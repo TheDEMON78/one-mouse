@@ -21,7 +21,6 @@ license-file = "LICENSE"
 category = "Utility"
 icons = ["assets/icon.png"]
 out-dir = "dist"
-before-packaging-command = "cargo build --release"
 binaries = [{ path = "one-mouse", main = true }]
 
 [package.metadata.packager.nsis]
