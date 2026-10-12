@@ -28,7 +28,7 @@ pub fn run() -> Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_title("one-mouse")
             .with_icon(icon)
-            .with_inner_size([460.0, 720.0])
+            .with_inner_size([520.0, 680.0])
             .with_min_inner_size([400.0, 480.0]),
         ..Default::default()
     };
@@ -181,10 +181,12 @@ struct App {
     local_ip: Option<IpAddr>,
     error: Option<String>,
     logo: egui::TextureHandle,
+    tab: Tab,
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        apply_theme(&cc.egui_ctx);
         let settings = Settings::load();
         let logo = {
             let image = image::load_from_memory(ICON_PNG)
@@ -207,6 +209,7 @@ impl App {
             local_ip: local_ip(),
             error: None,
             logo,
+            tab: Tab::Connection,
         };
         if app.settings.start_sharing && app.validate().is_ok() {
             app.start(&cc.egui_ctx);
@@ -269,137 +272,608 @@ impl App {
         running
     }
 
-    fn status_line(&mut self, running: bool) -> (egui::Color32, String) {
+    /// État affiché : couleur, titre court (pastille) et explication.
+    fn status_view(&mut self, running: bool) -> (egui::Color32, String, String) {
         let status = self.shared.lock().expect("verrou").status.clone();
-        let grey = egui::Color32::from_rgb(140, 145, 160);
-        let orange = egui::Color32::from_rgb(240, 160, 60);
-        let green = egui::Color32::from_rgb(80, 200, 120);
-        let blue = egui::Color32::from_rgb(88, 140, 255);
-        let red = egui::Color32::from_rgb(235, 85, 85);
         match (running, status) {
-            (_, Some(Status::Error(msg))) => (red, format!("Erreur : {msg}")),
-            (false, _) => (grey, "Partage arrêté".into()),
-            (true, None) => (orange, "Démarrage…".into()),
-            (true, Some(Status::Listening)) => (orange, "En attente de l'autre PC…".into()),
-            (true, Some(Status::Connecting)) => (orange, "Connexion à l'autre PC…".into()),
-            (true, Some(Status::Connected(name))) => (green, format!("Connecté à « {name} »")),
-            (true, Some(Status::Sending)) => (blue, "Vous contrôlez l'autre PC".into()),
-            (true, Some(Status::Receiving)) => (blue, "L'autre PC contrôle celui-ci".into()),
+            (_, Some(Status::Error(msg))) => (RED, "Erreur".into(), msg),
+            (false, _) => (
+                GREY,
+                "Arrêté".into(),
+                "Réglez la connexion puis démarrez le partage.".into(),
+            ),
+            (true, None) => (ORANGE, "Démarrage".into(), "Lancement du partage…".into()),
+            (true, Some(Status::Listening)) => (
+                ORANGE,
+                "En attente".into(),
+                "Démarrez le partage sur l'autre PC avec l'adresse ci-dessous.".into(),
+            ),
+            (true, Some(Status::Connecting)) => (
+                ORANGE,
+                "Connexion".into(),
+                format!("Recherche de {}…", self.settings.address.trim()),
+            ),
+            (true, Some(Status::Connected(name))) => (
+                GREEN,
+                "Connecté".into(),
+                format!("Relié à « {name} ». Poussez la souris vers l'autre écran."),
+            ),
+            (true, Some(Status::Sending)) => (
+                ACCENT,
+                "Sur l'autre PC".into(),
+                "Votre souris et votre clavier contrôlent l'autre PC.".into(),
+            ),
+            (true, Some(Status::Receiving)) => (
+                ACCENT,
+                "Contrôlé".into(),
+                "L'autre PC contrôle celui-ci.".into(),
+            ),
         }
     }
 
-    fn settings_ui(&mut self, ui: &mut egui::Ui) {
-        let s = &mut self.settings;
-
-        ui.heading("Connexion");
+    fn header(&mut self, ui: &mut egui::Ui, running: bool) {
+        let (color, short, _) = self.status_view(running);
         ui.horizontal(|ui| {
-            ui.radio_value(&mut s.connect, false, "Ce PC attend l'autre");
-            ui.radio_value(&mut s.connect, true, "Se connecter à l'autre PC");
-        });
-        if s.connect {
-            ui.horizontal(|ui| {
-                ui.label("Adresse de l'autre PC :");
-                ui.add(egui::TextEdit::singleline(&mut s.address).hint_text("192.168.1.20"));
+            ui.add(egui::Image::new(&self.logo).fit_to_exact_size(egui::vec2(40.0, 40.0)));
+            ui.vertical(|ui| {
+                ui.label(
+                    egui::RichText::new("one-mouse")
+                        .strong()
+                        .size(22.0)
+                        .color(TEXT),
+                );
+                ui.label(
+                    egui::RichText::new(format!(
+                        "BloopStudio · version {}",
+                        env!("CARGO_PKG_VERSION")
+                    ))
+                    .size(12.0)
+                    .color(MUTED),
+                );
             });
-        }
-        ui.horizontal(|ui| {
-            ui.label("Mot de passe :");
-            ui.add(
-                egui::TextEdit::singleline(&mut s.password)
-                    .password(!self.show_password)
-                    .hint_text("identique sur les deux PC"),
-            );
-            ui.checkbox(&mut self.show_password, "afficher");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                status_pill(ui, color, &short);
+            });
         });
+    }
+
+    fn tabs(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label("L'autre PC est");
-            egui::ComboBox::from_id_salt("side")
-                .selected_text(s.side.label())
-                .show_ui(ui, |ui| {
-                    for side in Side::ALL {
-                        ui.selectable_value(&mut s.side, side, side.label());
+            for tab in Tab::ALL {
+                let selected = self.tab == tab;
+                let text = egui::RichText::new(tab.label())
+                    .size(14.0)
+                    .color(if selected {
+                        egui::Color32::WHITE
+                    } else {
+                        MUTED
+                    });
+                let button = egui::Button::new(text)
+                    .fill(if selected {
+                        ACCENT
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    })
+                    .stroke(egui::Stroke::NONE)
+                    .corner_radius(8);
+                if ui.add(button).clicked() {
+                    self.tab = tab;
+                }
+            }
+        });
+    }
+
+    fn connection_tab(&mut self, ui: &mut egui::Ui, running: bool) {
+        let (color, short, detail) = self.status_view(running);
+        card(ui, |ui| {
+            ui.horizontal(|ui| {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                ui.painter().circle_filled(rect.center(), 6.0, color);
+                ui.label(egui::RichText::new(short).strong().size(17.0).color(TEXT));
+            });
+            ui.label(egui::RichText::new(detail).color(MUTED));
+            if let Some(ip) = self.local_ip {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Adresse de ce PC").color(MUTED));
+                    ui.label(
+                        egui::RichText::new(ip.to_string())
+                            .monospace()
+                            .size(16.0)
+                            .color(TEXT),
+                    );
+                    if ui.small_button("Copier").clicked() {
+                        ui.ctx().copy_text(ip.to_string());
                     }
                 });
-            ui.label("de celui-ci");
-        });
-        ui.horizontal(|ui| {
-            ui.label("Nom de ce PC :");
-            ui.add(egui::TextEdit::singleline(&mut s.name).hint_text("nom de l'ordinateur"));
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("Vitesse de la souris sur l'autre PC :");
-            ui.add(
-                egui::Slider::new(&mut s.pointer_speed, 0.25..=4.0)
-                    .logarithmic(true)
-                    .fixed_decimals(2)
-                    .prefix("×"),
-            );
-            if ui.small_button("1×").clicked() {
-                s.pointer_speed = 1.0;
             }
         });
 
-        ui.add_space(8.0);
-        ui.heading("Son et micro");
-        ui.checkbox(
-            &mut s.main,
-            "Ce PC est mon PC principal (souris, clavier et casque branchés dessus)",
-        );
-        if s.main {
-            ui.label(
-                egui::RichText::new("Le son de l'autre PC est joué ici, en permanence.")
+        ui.add_enabled_ui(!running, |ui| {
+            let s = &mut self.settings;
+            card(ui, |ui| {
+                section_title(ui, "Rôle de ce PC");
+                ui.columns(2, |cols| {
+                    choice_tile(
+                        &mut cols[0],
+                        &mut s.connect,
+                        false,
+                        "Attendre l'autre PC",
+                        "L'autre PC se connecte à celui-ci",
+                    );
+                    choice_tile(
+                        &mut cols[1],
+                        &mut s.connect,
+                        true,
+                        "Se connecter",
+                        "Ce PC rejoint l'autre",
+                    );
+                });
+                if s.connect {
+                    ui.add_space(4.0);
+                    field(ui, "Adresse de l'autre PC", |ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut s.address)
+                                .hint_text("192.168.1.20")
+                                .desired_width(f32::INFINITY),
+                        );
+                    });
+                }
+            });
+
+            card(ui, |ui| {
+                section_title(ui, "Sécurité");
+                field(ui, "Mot de passe (identique sur les deux PC)", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut s.password)
+                                .password(!self.show_password)
+                                .hint_text("8 caractères minimum")
+                                .desired_width(ui.available_width() - 70.0),
+                        );
+                        let eye = if self.show_password {
+                            "Masquer"
+                        } else {
+                            "Afficher"
+                        };
+                        if ui.small_button(eye).clicked() {
+                            self.show_password = !self.show_password;
+                        }
+                    });
+                });
+                field(ui, "Nom de ce PC (affiché chez l'autre)", |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut s.name)
+                            .hint_text("nom de l'ordinateur")
+                            .desired_width(f32::INFINITY),
+                    );
+                });
+            });
+        });
+    }
+
+    fn screens_tab(&mut self, ui: &mut egui::Ui, running: bool) {
+        ui.add_enabled_ui(!running, |ui| {
+            let s = &mut self.settings;
+            card(ui, |ui| {
+                section_title(ui, "Où se trouve l'autre PC ?");
+                ui.label(
+                    egui::RichText::new(
+                        "Cliquez sur l'emplacement de l'autre écran par rapport à celui-ci.",
+                    )
+                    .color(MUTED),
+                );
+                ui.add_space(6.0);
+                side_picker(ui, &mut s.side);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "L'autre PC est {} de celui-ci",
+                            s.side.label()
+                        ))
+                        .color(TEXT),
+                    );
+                });
+            });
+            card(ui, |ui| {
+                section_title(ui, "Vitesse de la souris sur l'autre PC");
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().slider_width = (ui.available_width() - 190.0).max(120.0);
+                    ui.add(
+                        egui::Slider::new(&mut s.pointer_speed, 0.25..=4.0)
+                            .logarithmic(true)
+                            .fixed_decimals(2)
+                            .prefix("×"),
+                    );
+                    if ui.small_button("Réinitialiser").clicked() {
+                        s.pointer_speed = 1.0;
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(
+                        "À ajuster si la souris va plus vite ou moins vite sur l'autre PC.",
+                    )
                     .small()
-                    .weak(),
-            );
-            output_combo(
-                ui,
-                "sound_output",
-                "Son de l'autre PC joué sur :",
-                &mut s.sound_output,
-                &self.outputs,
-            );
-            mode_combo(
-                ui,
-                "mic",
-                "Mon micro envoyé à l'autre PC :",
-                &mut s.mic,
-                "quand je le contrôle",
-            );
-        } else {
-            mode_combo(
-                ui,
-                "sound",
-                "Son de ce PC envoyé :",
-                &mut s.sound,
-                "quand l'autre PC le contrôle",
-            );
-            output_combo(
-                ui,
-                "mic_output",
-                "Micro de l'autre PC envoyé vers :",
-                &mut s.mic_output,
-                &self.outputs,
-            );
+                    .color(MUTED),
+                );
+            });
+        });
+    }
+
+    fn sound_tab(&mut self, ui: &mut egui::Ui, running: bool) {
+        ui.add_enabled_ui(!running, |ui| {
+            let outputs = &self.outputs;
+            let s = &mut self.settings;
+            card(ui, |ui| {
+                section_title(ui, "PC principal");
+                ui.checkbox(
+                    &mut s.main,
+                    "Ce PC est mon PC principal (souris, clavier et casque branchés dessus)",
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "À cocher sur un seul des deux PC : il reçoit le son de l'autre en permanence \
+                         et lui prête son micro.",
+                    )
+                    .small()
+                    .color(MUTED),
+                );
+            });
+            card(ui, |ui| {
+                if s.main {
+                    section_title(ui, "Son et micro de ce PC principal");
+                    output_combo(ui, "sound_output", "Son de l'autre PC joué sur", &mut s.sound_output, outputs);
+                    mode_combo(ui, "mic", "Mon micro envoyé à l'autre PC", &mut s.mic, "quand je le contrôle");
+                } else {
+                    section_title(ui, "Son et micro de ce PC");
+                    mode_combo(ui, "sound", "Son de ce PC envoyé", &mut s.sound, "quand l'autre PC le contrôle");
+                    output_combo(ui, "mic_output", "Micro de l'autre PC envoyé vers", &mut s.mic_output, outputs);
+                    ui.label(
+                        egui::RichText::new(
+                            "Le micro du PC principal devient un micro de ce PC : choisissez « Micro-one-mouse » \
+                             (Linux), « CABLE Output » (VB-Cable, Windows) ou BlackHole (macOS) dans vos applications.",
+                        )
+                        .small()
+                        .color(MUTED),
+                    );
+                }
+            });
+        });
+        if ui
+            .small_button("Actualiser la liste des sorties audio")
+            .clicked()
+        {
+            self.outputs = audio::output_names();
+        }
+    }
+
+    fn options_tab(&mut self, ui: &mut egui::Ui, running: bool) {
+        ui.add_enabled_ui(!running, |ui| {
+            let s = &mut self.settings;
+            card(ui, |ui| {
+                section_title(ui, "Partage");
+                ui.checkbox(&mut s.clipboard, "Partager le presse-papier (texte)");
+                ui.checkbox(
+                    &mut s.start_sharing,
+                    "Démarrer le partage à l'ouverture de one-mouse",
+                );
+            });
+        });
+        card(ui, |ui| {
+            section_title(ui, "Démarrage");
+            let mut autostart = self.autostart;
+            if ui
+                .checkbox(&mut autostart, "Lancer one-mouse à l'ouverture de session")
+                .changed()
+            {
+                match autostart::set_enabled(autostart) {
+                    Ok(()) => self.autostart = autostart,
+                    Err(e) => self.error = Some(format!("{e:#}")),
+                }
+            }
+        });
+        if let Some(allowed) = self.firewall_allowed {
+            card(ui, |ui| {
+                section_title(ui, "Pare-feu Windows");
+                if allowed {
+                    ui.label(
+                        egui::RichText::new("one-mouse est autorisé à recevoir les connexions.")
+                            .color(GREEN),
+                    );
+                } else {
+                    ui.label(
+                        egui::RichText::new(
+                            "Le pare-feu peut empêcher l'autre PC de se connecter à celui-ci.",
+                        )
+                        .color(ORANGE),
+                    );
+                    if ui.button("Autoriser one-mouse dans le pare-feu").clicked() {
+                        match firewall::allow() {
+                            Ok(()) => {
+                                self.firewall_allowed = Some(true);
+                                self.error = None;
+                            }
+                            Err(e) => self.error = Some(format!("Pare-feu : {e:#}")),
+                        }
+                    }
+                }
+            });
+        }
+        card(ui, |ui| {
+            section_title(ui, "Raccourci de secours");
             ui.label(
                 egui::RichText::new(
-                    "Cochez « PC principal » sur le PC où vous écoutez (un seul des deux). \
-                     Le micro du PC principal devient un micro de ce PC : choisissez \
-                     « Micro-one-mouse » (Linux), « CABLE Output » (VB-Cable, Windows) ou \
-                     BlackHole (macOS) comme micro dans vos applications.",
+                    "Ctrl + Maj + Alt + touche Windows / Cmd : reprendre la main à tout moment.",
                 )
-                .small()
-                .weak(),
+                .color(MUTED),
+            );
+        });
+    }
+
+    fn log_tab(&mut self, ui: &mut egui::Ui) {
+        card(ui, |ui| {
+            ui.horizontal(|ui| {
+                section_title(ui, "Journal");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("Copier").clicked() {
+                        let text = self
+                            .shared
+                            .lock()
+                            .expect("verrou")
+                            .log
+                            .iter()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        ui.ctx().copy_text(text);
+                    }
+                });
+            });
+            egui::ScrollArea::vertical()
+                .max_height(ui.available_height().max(200.0))
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    let shared = self.shared.lock().expect("verrou");
+                    if shared.log.is_empty() {
+                        ui.label(egui::RichText::new("Rien pour le moment.").color(MUTED));
+                    }
+                    for line in &shared.log {
+                        ui.label(egui::RichText::new(line).monospace().size(11.5));
+                    }
+                });
+        });
+    }
+}
+
+const ACCENT: egui::Color32 = egui::Color32::from_rgb(88, 140, 255);
+const GREEN: egui::Color32 = egui::Color32::from_rgb(70, 200, 120);
+const ORANGE: egui::Color32 = egui::Color32::from_rgb(240, 160, 60);
+const RED: egui::Color32 = egui::Color32::from_rgb(235, 85, 85);
+const GREY: egui::Color32 = egui::Color32::from_rgb(130, 136, 150);
+const TEXT: egui::Color32 = egui::Color32::from_rgb(230, 234, 242);
+const MUTED: egui::Color32 = egui::Color32::from_rgb(145, 152, 168);
+const BACKGROUND: egui::Color32 = egui::Color32::from_rgb(17, 20, 28);
+const SURFACE: egui::Color32 = egui::Color32::from_rgb(26, 30, 41);
+const SURFACE_LIGHT: egui::Color32 = egui::Color32::from_rgb(36, 41, 55);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Connection,
+    Screens,
+    Sound,
+    Options,
+    Log,
+}
+
+impl Tab {
+    const ALL: [Tab; 5] = [
+        Tab::Connection,
+        Tab::Screens,
+        Tab::Sound,
+        Tab::Options,
+        Tab::Log,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Tab::Connection => "Connexion",
+            Tab::Screens => "Écrans",
+            Tab::Sound => "Son",
+            Tab::Options => "Options",
+            Tab::Log => "Journal",
+        }
+    }
+}
+
+/// Thème sombre aux couleurs du logo.
+fn apply_theme(ctx: &egui::Context) {
+    let mut visuals = egui::Visuals::dark();
+    visuals.panel_fill = BACKGROUND;
+    visuals.window_fill = SURFACE;
+    visuals.extreme_bg_color = egui::Color32::from_rgb(12, 14, 20);
+    visuals.selection.bg_fill = ACCENT;
+    visuals.hyperlink_color = ACCENT;
+    let radius = egui::CornerRadius::same(8);
+    for widget in [
+        &mut visuals.widgets.noninteractive,
+        &mut visuals.widgets.inactive,
+        &mut visuals.widgets.hovered,
+        &mut visuals.widgets.active,
+        &mut visuals.widgets.open,
+    ] {
+        widget.corner_radius = radius;
+    }
+    visuals.widgets.inactive.weak_bg_fill = SURFACE_LIGHT;
+    visuals.widgets.inactive.bg_fill = SURFACE_LIGHT;
+    visuals.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(48, 55, 74);
+    // Contours visibles pour les cases à cocher et champs non sélectionnés.
+    visuals.widgets.inactive.bg_stroke =
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(72, 80, 100));
+    ctx.set_visuals(visuals);
+    ctx.all_styles_mut(|style| {
+        style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+        style.spacing.button_padding = egui::vec2(12.0, 6.0);
+        style.spacing.interact_size.y = 26.0;
+    });
+}
+
+fn card<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let inner = egui::Frame::new()
+        .fill(SURFACE)
+        .stroke(egui::Stroke::new(1.0, SURFACE_LIGHT))
+        .corner_radius(12)
+        .inner_margin(14)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add_contents(ui)
+        })
+        .inner;
+    ui.add_space(6.0);
+    inner
+}
+
+fn section_title(ui: &mut egui::Ui, title: &str) {
+    ui.label(egui::RichText::new(title).strong().size(15.0).color(TEXT));
+}
+
+fn field(ui: &mut egui::Ui, label: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
+    ui.label(egui::RichText::new(label).size(12.5).color(MUTED));
+    add_contents(ui);
+}
+
+/// Pastille d'état (point de couleur + texte), dessinée à sa taille exacte.
+fn status_pill(ui: &mut egui::Ui, color: egui::Color32, text: &str) {
+    let galley =
+        ui.painter()
+            .layout_no_wrap(text.to_owned(), egui::FontId::proportional(14.0), color);
+    let size = egui::vec2(galley.size().x + 38.0, 28.0);
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 14, color.gamma_multiply(0.18));
+    painter.rect_stroke(
+        rect,
+        14,
+        egui::Stroke::new(1.0, color.gamma_multiply(0.6)),
+        egui::StrokeKind::Inside,
+    );
+    painter.circle_filled(egui::pos2(rect.left() + 15.0, rect.center().y), 4.5, color);
+    painter.galley(
+        egui::pos2(rect.left() + 26.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        color,
+    );
+}
+
+/// Grande vignette cliquable pour un choix entre deux options.
+fn choice_tile(ui: &mut egui::Ui, value: &mut bool, option: bool, title: &str, detail: &str) {
+    let selected = *value == option;
+    let response = egui::Frame::new()
+        .fill(if selected {
+            ACCENT.gamma_multiply(0.22)
+        } else {
+            SURFACE_LIGHT
+        })
+        .stroke(egui::Stroke::new(
+            if selected { 2.0 } else { 1.0 },
+            if selected { ACCENT } else { SURFACE_LIGHT },
+        ))
+        .corner_radius(10)
+        .inner_margin(10)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(egui::RichText::new(title).strong().color(TEXT));
+            ui.label(egui::RichText::new(detail).small().color(MUTED));
+        })
+        .response
+        .interact(egui::Sense::click());
+    if response.clicked() {
+        *value = option;
+    }
+}
+
+/// Disposition des écrans : ce PC au centre, l'autre PC à cliquer autour.
+fn side_picker(ui: &mut egui::Ui, side: &mut Side) {
+    let size = egui::vec2(ui.available_width(), 190.0);
+    let (area, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let center = area.center();
+    let painter = ui.painter_at(area);
+    let screen = |c: egui::Pos2, w: f32, h: f32| egui::Rect::from_center_size(c, egui::vec2(w, h));
+
+    let this = screen(center, 96.0, 60.0);
+    painter.rect_filled(this, 8, SURFACE_LIGHT);
+    painter.rect_stroke(
+        this,
+        8,
+        egui::Stroke::new(2.0, TEXT),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        this.center(),
+        egui::Align2::CENTER_CENTER,
+        "Ce PC",
+        egui::FontId::proportional(14.0),
+        TEXT,
+    );
+
+    let slots = [
+        (
+            Side::Left,
+            screen(center - egui::vec2(116.0, 0.0), 84.0, 52.0),
+        ),
+        (
+            Side::Right,
+            screen(center + egui::vec2(116.0, 0.0), 84.0, 52.0),
+        ),
+        (
+            Side::Top,
+            screen(center - egui::vec2(0.0, 64.0), 84.0, 52.0).translate(egui::vec2(0.0, -6.0)),
+        ),
+        (
+            Side::Bottom,
+            screen(center + egui::vec2(0.0, 64.0), 84.0, 52.0).translate(egui::vec2(0.0, 6.0)),
+        ),
+    ];
+    for (slot, rect) in slots {
+        let id = ui.id().with(("side", slot.arg()));
+        let response = ui.interact(rect, id, egui::Sense::click());
+        let selected = *side == slot;
+        let (fill, stroke, label) = if selected {
+            (
+                ACCENT.gamma_multiply(0.35),
+                egui::Stroke::new(2.0, ACCENT),
+                "Autre PC",
+            )
+        } else if response.hovered() {
+            (SURFACE_LIGHT, egui::Stroke::new(1.5, MUTED), "Ici ?")
+        } else {
+            (
+                egui::Color32::TRANSPARENT,
+                egui::Stroke::new(1.0, GREY.gamma_multiply(0.6)),
+                "",
+            )
+        };
+        painter.rect_filled(rect, 8, fill);
+        painter.rect_stroke(rect, 8, stroke, egui::StrokeKind::Inside);
+        if !label.is_empty() {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                label,
+                egui::FontId::proportional(13.0),
+                if selected {
+                    egui::Color32::WHITE
+                } else {
+                    MUTED
+                },
             );
         }
-
-        ui.add_space(8.0);
-        ui.heading("Options");
-        ui.checkbox(&mut s.clipboard, "Partager le presse-papier (texte)");
-        ui.checkbox(
-            &mut s.start_sharing,
-            "Démarrer le partage à l'ouverture de one-mouse",
-        );
+        if response.clicked() {
+            *side = slot;
+        }
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
     }
 }
 
@@ -409,10 +883,10 @@ fn mode_combo(ui: &mut egui::Ui, id: &str, label: &str, mode: &mut Mode, auto: &
         Mode::Auto => auto.to_owned(),
         Mode::Always => "toujours".to_owned(),
     };
-    ui.horizontal(|ui| {
-        ui.label(label);
+    field(ui, label, |ui| {
         egui::ComboBox::from_id_salt(id)
             .selected_text(text(*mode))
+            .width(ui.available_width())
             .show_ui(ui, |ui| {
                 for m in Mode::ALL {
                     ui.selectable_value(mode, m, text(m));
@@ -433,11 +907,10 @@ fn output_combo(ui: &mut egui::Ui, id: &str, label: &str, value: &mut String, ou
     } else {
         value.clone()
     };
-    ui.horizontal(|ui| {
-        ui.label(label);
+    field(ui, label, |ui| {
         egui::ComboBox::from_id_salt(id)
             .selected_text(shown)
-            .width(220.0)
+            .width(ui.available_width())
             .show_ui(ui, |ui| {
                 ui.selectable_value(value, String::new(), automatic);
                 for name in outputs {
@@ -456,121 +929,73 @@ impl eframe::App for App {
             ctx.request_repaint_after(Duration::from_millis(500));
         }
 
-        egui::CentralPanel::default().show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add(egui::Image::new(&self.logo).fit_to_exact_size(egui::vec2(48.0, 48.0)));
-                    ui.vertical(|ui| {
-                        ui.heading(egui::RichText::new("one-mouse").strong().size(24.0));
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "Version {} — BloopStudio",
-                                env!("CARGO_PKG_VERSION")
-                            ))
-                            .weak(),
-                        );
-                    });
-                });
+        egui::Panel::top("entete")
+            .frame(
+                egui::Frame::new()
+                    .fill(SURFACE)
+                    .inner_margin(egui::Margin::symmetric(16, 12)),
+            )
+            .show(ui, |ui| {
+                self.header(ui, running);
                 ui.add_space(6.0);
+                self.tabs(ui);
+            });
 
-                let (color, text) = self.status_line(running);
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        let (rect, _) =
-                            ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
-                        ui.painter().circle_filled(rect.center(), 7.0, color);
-                        ui.label(egui::RichText::new(text).strong().size(16.0));
-                    });
-                    if let Some(ip) = self.local_ip {
-                        ui.horizontal(|ui| {
-                            ui.label("Adresse de ce PC :");
-                            ui.add(egui::Label::new(egui::RichText::new(ip.to_string()).monospace()).selectable(true));
-                        });
-                    }
-                    ui.label(
-                        egui::RichText::new(
-                            "Reprendre la main à tout moment : Ctrl + Maj + Alt + touche Windows / Cmd",
-                        )
-                        .small()
-                        .weak(),
-                    );
-                });
-                ui.add_space(8.0);
-
-                ui.add_enabled_ui(!running, |ui| self.settings_ui(ui));
+        egui::Panel::bottom("actions")
+            .frame(
+                egui::Frame::new()
+                    .fill(SURFACE)
+                    .inner_margin(egui::Margin::symmetric(16, 12)),
+            )
+            .show(ui, |ui| {
+                if let Some(error) = &self.error {
+                    ui.label(egui::RichText::new(error).color(RED));
+                }
                 if running {
-                    ui.label(egui::RichText::new("Arrêtez le partage pour modifier les réglages.").small().weak());
+                    ui.label(
+                        egui::RichText::new("Arrêtez le partage pour modifier les réglages.")
+                            .small()
+                            .color(MUTED),
+                    );
                 }
-
-                if self.firewall_allowed == Some(false) {
-                    egui::Frame::group(ui.style()).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.colored_label(
-                            egui::Color32::from_rgb(240, 160, 60),
-                            "Le pare-feu Windows peut empêcher l'autre PC de se connecter à celui-ci.",
-                        );
-                        if ui.button("Autoriser one-mouse dans le pare-feu").clicked() {
-                            match firewall::allow() {
-                                Ok(()) => {
-                                    self.firewall_allowed = Some(true);
-                                    self.error = None;
-                                }
-                                Err(e) => self.error = Some(format!("Pare-feu : {e:#}")),
-                            }
-                        }
-                    });
-                    ui.add_space(4.0);
-                }
-
-                let mut autostart = self.autostart;
-                if ui
-                    .checkbox(&mut autostart, "Lancer one-mouse à l'ouverture de session")
-                    .changed()
-                {
-                    match autostart::set_enabled(autostart) {
-                        Ok(()) => self.autostart = autostart,
-                        Err(e) => self.error = Some(format!("{e:#}")),
-                    }
-                }
-
-                ui.add_space(10.0);
                 let (label, fill) = if running {
-                    ("Arrêter le partage", egui::Color32::from_rgb(170, 60, 60))
+                    ("Arrêter le partage", egui::Color32::from_rgb(190, 70, 70))
                 } else {
-                    ("Démarrer le partage", egui::Color32::from_rgb(60, 110, 230))
+                    ("Démarrer le partage", ACCENT)
                 };
-                let button = egui::Button::new(egui::RichText::new(label).size(17.0).color(egui::Color32::WHITE))
-                    .fill(fill)
-                    .min_size(egui::vec2(ui.available_width(), 40.0));
-                if ui.add(button).clicked() {
+                let button = egui::Button::new(
+                    egui::RichText::new(label)
+                        .size(16.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(fill)
+                .corner_radius(10);
+                // add_sized centre le texte dans toute la largeur.
+                if ui.add_sized([ui.available_width(), 42.0], button).clicked() {
                     if running {
                         self.stop();
                     } else {
                         self.start(&ctx);
                     }
                 }
-                if let Some(error) = &self.error {
-                    ui.colored_label(egui::Color32::from_rgb(235, 85, 85), error);
-                }
+            });
 
-                ui.add_space(8.0);
-                egui::CollapsingHeader::new("Journal").show(ui, |ui| {
-                    egui::ScrollArea::vertical()
-                        .max_height(180.0)
-                        .stick_to_bottom(true)
-                        .show(ui, |ui| {
-                            let shared = self.shared.lock().expect("verrou");
-                            for line in &shared.log {
-                                ui.label(egui::RichText::new(line).monospace().small());
-                            }
-                        });
-                    if ui.small_button("Actualiser la liste des sorties audio").clicked() {
-                        self.outputs = audio::output_names();
-                    }
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(BACKGROUND)
+                    .inner_margin(egui::Margin::symmetric(16, 12)),
+            )
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| match self.tab {
+                    Tab::Connection => self.connection_tab(ui, running),
+                    Tab::Screens => self.screens_tab(ui, running),
+                    Tab::Sound => self.sound_tab(ui, running),
+                    Tab::Options => self.options_tab(ui, running),
+                    Tab::Log => self.log_tab(ui),
                 });
             });
-        });
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
