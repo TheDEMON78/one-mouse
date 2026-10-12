@@ -74,7 +74,16 @@ jobs:
       - name: Compilation
         run: cargo build --release --target ${{ matrix.target }}
       - name: Installateurs
-        run: cargo packager --release --target ${{ matrix.target }} --formats ${{ matrix.formats }}
+        shell: bash
+        # Les outils de création (create-dmg, linuxdeploy, NSIS…) sont téléchargés :
+        # nouvel essai en cas de panne réseau passagère.
+        run: |
+          for attempt in 1 2 3; do
+            cargo packager --release --target ${{ matrix.target }} --formats ${{ matrix.formats }} && exit 0
+            echo "::warning::échec de la création des installateurs (essai $attempt/3)"
+            sleep $((attempt * 15))
+          done
+          exit 1
       - uses: actions/upload-artifact@v4
         with:
           name: one-mouse-${{ needs.version.outputs.version }}-${{ matrix.target }}

@@ -11,7 +11,13 @@ version="1.$((count / 100)).$((count % 100))"
 
 if [ "${1:-}" = "--apply" ]; then
   # Remplace uniquement la version du paquet (première ligne `version = ` du fichier).
-  sed -i.bak "0,/^version = \".*\"/s//version = \"$version\"/" Cargo.toml
-  rm -f Cargo.toml.bak
+  # awk plutôt que sed : la syntaxe de sed diffère entre Linux et macOS.
+  awk -v v="$version" '!done && /^version = "/ { print "version = \"" v "\""; done = 1; next } { print }' \
+    Cargo.toml > Cargo.toml.tmp
+  mv Cargo.toml.tmp Cargo.toml
+  if ! grep -q "^version = \"$version\"$" Cargo.toml; then
+    echo "version $version non appliquée à Cargo.toml" >&2
+    exit 1
+  fi
 fi
 echo "$version"
