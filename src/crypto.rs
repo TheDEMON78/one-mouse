@@ -14,7 +14,7 @@ use rand::RngCore;
 use sha2::Sha256;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::protocol::Message;
+use crate::protocol::{Message, PeerInfo};
 
 pub const MIN_PASSWORD_LEN: usize = 8;
 const MAGIC: &[u8; 8] = b"OMFTPC01";
@@ -77,9 +77,12 @@ impl<R: AsyncRead + Unpin> SecureReader<R> {
         let plain = self
             .cipher
             .decrypt(&nonce(self.counter), frame.as_slice())
-            .map_err(|_| anyhow::anyhow!("message invalide (mot de passe différent ?)"))?;
+            .map_err(|_| {
+                anyhow::anyhow!("message illisible : les mots de passe sont-ils identiques ?")
+            })?;
         self.counter += 1;
-        Ok(postcard::from_bytes(&plain)?)
+        postcard::from_bytes(&plain)
+            .context("message incompris : mettez one-mouse à jour sur les deux PC")
     }
 }
 
@@ -101,14 +104,14 @@ impl<W: AsyncWrite + Unpin> SecureWriter<W> {
 }
 
 /// Échange les nonces de session, dérive les clés et vérifie le mot de passe
-/// grâce au message `Hello`. Renvoie le canal chiffré et le nom de l'autre PC.
+/// grâce au message `Hello`. Renvoie le canal chiffré et ce que l'autre PC annonce.
 pub async fn handshake<R, W>(
     mut reader: R,
     mut writer: W,
     role: Role,
     psk: &Psk,
-    local_name: &str,
-) -> Result<(SecureReader<R>, SecureWriter<W>, String)>
+    local: &PeerInfo,
+) -> Result<(SecureReader<R>, SecureWriter<W>, PeerInfo)>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -163,21 +166,22 @@ where
     secure_writer
         .send(&Message::Hello {
             version: crate::protocol::PROTOCOL_VERSION,
-            name: local_name.to_owned(),
+            name: local.name.clone(),
+            main: local.main,
         })
         .await?;
-    match secure_reader
-        .recv()
-        .await
-        .context("authentification refusée : les mots de passe sont-ils identiques ?")?
-    {
-        Message::Hello { version, name } => {
+    match secure_reader.recv().await.context("connexion refusée")? {
+        Message::Hello {
+            version,
+            name,
+            main,
+        } => {
             ensure!(
                 version == crate::protocol::PROTOCOL_VERSION,
                 "version de protocole différente (locale {}, distante {version})",
                 crate::protocol::PROTOCOL_VERSION
             );
-            Ok((secure_reader, secure_writer, name))
+            Ok((secure_reader, secure_writer, PeerInfo { name, main }))
         }
         other => bail!("message inattendu pendant la connexion : {other:?}"),
     }
@@ -188,6 +192,13 @@ mod tests {
     use super::*;
     use crate::protocol::WireEvent;
 
+    fn peer(name: &str, main: bool) -> PeerInfo {
+        PeerInfo {
+            name: name.into(),
+            main,
+        }
+    }
+
     async fn pair(
         pw_a: &str,
         pw_b: &str,
@@ -195,12 +206,12 @@ mod tests {
         Result<(
             SecureReader<impl AsyncRead + Unpin>,
             SecureWriter<impl AsyncWrite + Unpin>,
-            String,
+            PeerInfo,
         )>,
         Result<(
             SecureReader<impl AsyncRead + Unpin>,
             SecureWriter<impl AsyncWrite + Unpin>,
-            String,
+            PeerInfo,
         )>,
     ) {
         let (a, b) = tokio::io::duplex(64 * 1024);
@@ -208,9 +219,10 @@ mod tests {
         let (br, bw) = tokio::io::split(b);
         let psk_a = Psk::from_password(pw_a).unwrap();
         let psk_b = Psk::from_password(pw_b).unwrap();
+        let (info_a, info_b) = (peer("pc-a", true), peer("pc-b", false));
         tokio::join!(
-            handshake(ar, aw, Role::Listener, &psk_a, "pc-a"),
-            handshake(br, bw, Role::Connector, &psk_b, "pc-b"),
+            handshake(ar, aw, Role::Listener, &psk_a, &info_a),
+            handshake(br, bw, Role::Connector, &psk_b, &info_b),
         )
     }
 
@@ -219,8 +231,8 @@ mod tests {
         let (a, b) = pair("mot de passe", "mot de passe").await;
         let (mut ar, mut aw, a_peer) = a.unwrap();
         let (mut br, mut bw, b_peer) = b.unwrap();
-        assert_eq!(a_peer, "pc-b");
-        assert_eq!(b_peer, "pc-a");
+        assert_eq!(a_peer, peer("pc-b", false));
+        assert_eq!(b_peer, peer("pc-a", true));
 
         let msg = Message::Input(WireEvent::Motion { dx: 4.0, dy: -2.0 });
         aw.send(&msg).await.unwrap();

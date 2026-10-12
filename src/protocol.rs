@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::audio::AudioFrame;
 
 /// Version du protocole, incrémentée à chaque changement incompatible.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Taille maximale d'un texte de presse-papier synchronisé (512 Kio).
 pub const MAX_CLIPBOARD_LEN: usize = 512 * 1024;
@@ -14,7 +14,12 @@ pub const MAX_CLIPBOARD_LEN: usize = 512 * 1024;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Message {
     /// Premier message chiffré : prouve que les deux côtés ont le même mot de passe.
-    Hello { version: u32, name: String },
+    Hello {
+        version: u32,
+        name: String,
+        /// PC principal : celui où sont branchés souris, clavier et casque.
+        main: bool,
+    },
     /// L'émetteur commence à envoyer ses entrées : le récepteur prend la main.
     Enter,
     /// Un événement souris ou clavier à rejouer sur le récepteur.
@@ -34,6 +39,13 @@ pub enum Message {
     },
     /// Maintien de la connexion.
     Ping,
+}
+
+/// Ce que chaque PC annonce de lui-même à la connexion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerInfo {
+    pub name: String,
+    pub main: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

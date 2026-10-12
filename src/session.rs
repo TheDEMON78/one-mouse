@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use input_capture::{CaptureEvent, Position};
 use input_emulation::InputEmulation;
-use input_event::{Event, KeyboardEvent, scancode};
+use input_event::{Event, KeyboardEvent, PointerEvent, scancode};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
@@ -21,7 +21,7 @@ use crate::audio::{self, AudioCapture, AudioConfig, AudioFrame, AudioPlayer, Sou
 use crate::capture::Capture;
 use crate::clipboard::ClipboardSync;
 use crate::crypto::{self, Psk, Role};
-use crate::protocol::{self, AudioKind, MAX_CLIPBOARD_LEN, Message};
+use crate::protocol::{self, AudioKind, MAX_CLIPBOARD_LEN, Message, PeerInfo};
 use crate::status::{self, Status};
 
 /// Identifiant de l'unique autre PC (la V1 gère une seule connexion).
@@ -50,30 +50,49 @@ pub struct Local {
     /// Position de l'autre PC par rapport à celui-ci.
     pub peer_side: Position,
     pub audio: AudioConfig,
+    /// Multiplicateur des mouvements de souris envoyés à l'autre PC.
+    pub pointer_speed: f64,
 }
 
 #[derive(Default)]
 struct State {
     /// Nom de l'autre PC.
     peer_name: String,
+    /// L'autre PC est le PC principal (souris, clavier, casque).
+    peer_main: bool,
     /// Nos entrées sont capturées et envoyées à l'autre PC.
     sending: bool,
     /// L'autre PC nous envoie ses entrées.
     receiving: bool,
+    /// Multiplicateur des mouvements envoyés.
+    pointer_speed: f64,
+    /// Fractions de pixel pas encore envoyées (reportées au mouvement suivant).
+    motion_rest: (f64, f64),
 }
 
 pub async fn run(stream: TcpStream, role: Role, local: &mut Local) -> Result<()> {
     stream.set_nodelay(true)?;
     let (reader, writer) = stream.into_split();
-    let (mut reader, mut writer, peer_name) = tokio::time::timeout(
+    let (mut reader, mut writer, peer) = tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
-        crypto::handshake(reader, writer, role, &local.psk, &local.name),
+        crypto::handshake(
+            reader,
+            writer,
+            role,
+            &local.psk,
+            &PeerInfo {
+                name: local.name.clone(),
+                main: local.audio.main,
+            },
+        ),
     )
     .await
     .context("l'autre PC n'a pas répondu à temps")??;
     log::info!(
-        "connecté à « {peer_name} » (situé à {})",
-        side_name(local.peer_side)
+        "connecté à « {} » (situé à {}{})",
+        peer.name,
+        side_name(local.peer_side),
+        if peer.main { ", PC principal" } else { "" }
     );
 
     let (out_tx, mut out_rx) = mpsc::channel::<Message>(1024);
@@ -103,8 +122,8 @@ pub async fn run(stream: TcpStream, role: Role, local: &mut Local) -> Result<()>
     }
     local.emulation.create(PEER).await;
 
-    status::emit(Status::Connected(peer_name.clone()));
-    let result = event_loop(local, peer_name, &out_tx, &mut in_rx).await;
+    status::emit(Status::Connected(peer.name.clone()));
+    let result = event_loop(local, peer, &out_tx, &mut in_rx).await;
 
     // Toujours rendre le curseur et relâcher les touches, même en cas d'erreur.
     if let Some(capture) = &mut local.capture {
@@ -128,14 +147,22 @@ pub async fn run(stream: TcpStream, role: Role, local: &mut Local) -> Result<()>
 
 async fn event_loop(
     local: &mut Local,
-    peer_name: String,
+    peer: PeerInfo,
     out: &mpsc::Sender<Message>,
     incoming: &mut mpsc::Receiver<Message>,
 ) -> Result<()> {
     let mut state = State {
-        peer_name,
+        peer_name: peer.name,
+        peer_main: peer.main,
+        pointer_speed: local.pointer_speed,
         ..State::default()
     };
+    if local.audio.sound == audio::Mode::Always && local.audio.main == state.peer_main {
+        log::info!(
+            "son envoyé seulement quand l'autre PC contrôle celui-ci : pour l'entendre en permanence, \
+             cochez « PC principal » sur le PC où vous écoutez (et seulement sur lui)"
+        );
+    }
     let mut audio = AudioState::default();
     let mut ping = tokio::time::interval(PING_INTERVAL);
 
@@ -243,21 +270,37 @@ impl AudioLink {
 struct AudioState {
     sound: AudioLink,
     mic: AudioLink,
+    /// Sortie où est joué le micro reçu (micro virtuel), une fois choisie.
+    mic_output: Option<String>,
 }
 
 impl AudioState {
     /// Démarre ou arrête les captures selon qui contrôle qui.
     fn sync(&mut self, config: &AudioConfig, state: &State) {
-        self.sound.sync_capture(
-            config.sound.wanted(state.receiving),
-            Source::System,
-            config.sound_device.as_deref(),
-        );
-        self.mic.sync_capture(
-            config.mic.wanted(state.sending),
-            Source::Microphone,
-            config.mic_device.as_deref(),
-        );
+        let (sound, mic) = audio_directions(config, state);
+        self.sound
+            .sync_capture(sound, Source::System, config.sound_device.as_deref());
+        self.mic
+            .sync_capture(mic, Source::Microphone, config.mic_device.as_deref());
+    }
+}
+
+/// Faut-il envoyer maintenant (son du système, micro) ?
+///
+/// Le son va de l'autre PC vers le PC principal, le micro du PC principal vers
+/// l'autre. Sans PC principal défini (ou avec deux), le son n'est envoyé que par
+/// le PC contrôlé et le micro que par celui qui contrôle : un seul sens à la fois,
+/// donc jamais de boucle d'écho (le son joué serait recapturé et renvoyé).
+fn audio_directions(config: &AudioConfig, state: &State) -> (bool, bool) {
+    use audio::Mode;
+    let auto = |mode: Mode, active: bool| mode != Mode::Off && active;
+    match (config.main, state.peer_main) {
+        (false, true) => (config.sound.wanted(state.receiving), false),
+        (true, false) => (false, config.mic.wanted(state.sending)),
+        _ => (
+            auto(config.sound, state.receiving),
+            auto(config.mic, state.sending),
+        ),
     }
 }
 
@@ -300,10 +343,32 @@ async fn on_capture(
                 stop_sending(capture, state, out).await?;
                 return Ok(());
             }
+            let Some(event) = scale_motion(state, event) else {
+                return Ok(());
+            };
             send(out, Message::Input(event.into())).await?;
         }
     }
     Ok(())
+}
+
+/// Applique la vitesse choisie et n'envoie que des pixels entiers : les fractions
+/// sont reportées au mouvement suivant. Sans cela, les petits mouvements (moins
+/// d'un pixel, fréquents sous macOS et Wayland) seraient perdus par les PC qui
+/// tronquent à l'entier, comme Windows : la souris y paraîtrait plus lente.
+fn scale_motion(state: &mut State, event: Event) -> Option<Event> {
+    let Event::Pointer(PointerEvent::Motion { time, dx, dy }) = event else {
+        return Some(event);
+    };
+    let x = dx * state.pointer_speed + state.motion_rest.0;
+    let y = dy * state.pointer_speed + state.motion_rest.1;
+    let (sx, sy) = (x.round(), y.round());
+    state.motion_rest = (x - sx, y - sy);
+    (sx != 0.0 || sy != 0.0).then_some(Event::Pointer(PointerEvent::Motion {
+        time,
+        dx: sx,
+        dy: sy,
+    }))
 }
 
 async fn on_message(
@@ -362,17 +427,31 @@ async fn on_message(
                     .sound
                     .play(&frame, local.audio.sound_output.as_deref()),
                 AudioKind::Mic => {
-                    if audio.mic.player.is_none()
-                        && !audio.mic.player_failed
-                        && local.audio.mic_output.is_none()
-                        && local.audio.sound != audio::Mode::Off
-                    {
-                        log::warn!(
-                            "le micro de l'autre PC est joué sur les haut-parleurs et risque de lui être renvoyé \
-                             avec le son : utilisez --mic-output vers un câble audio virtuel"
-                        );
+                    if audio.mic.player.is_none() && !audio.mic.player_failed {
+                        // Le micro de l'autre PC devient un micro de ce PC : il est joué
+                        // dans un micro virtuel, jamais sur les haut-parleurs (écho).
+                        let output = local
+                            .audio
+                            .mic_output
+                            .clone()
+                            .or_else(audio::virtual_mic_output);
+                        match output {
+                            Some(output) => {
+                                log::info!("micro de l'autre PC disponible via « {output} »");
+                                audio.mic_output = Some(output);
+                            }
+                            None => {
+                                log::warn!(
+                                    "micro de l'autre PC ignoré : aucun micro virtuel. Installez VB-Cable \
+                                     (Windows, vb-audio.com/Cable) ou BlackHole (macOS), puis redémarrez le partage"
+                                );
+                                audio.mic.player_failed = true;
+                            }
+                        }
                     }
-                    audio.mic.play(&frame, local.audio.mic_output.as_deref());
+                    if let Some(output) = audio.mic_output.clone() {
+                        audio.mic.play(&frame, Some(&output));
+                    }
                 }
             }
         }
@@ -409,5 +488,131 @@ pub fn side_name(side: Position) -> &'static str {
         Position::Right => "droite",
         Position::Top => "en haut",
         Position::Bottom => "en bas",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audio::Mode;
+
+    fn config(main: bool, sound: Mode, mic: Mode) -> AudioConfig {
+        AudioConfig {
+            main,
+            sound,
+            mic,
+            sound_device: None,
+            mic_device: None,
+            sound_output: None,
+            mic_output: None,
+        }
+    }
+
+    fn state(peer_main: bool, sending: bool, receiving: bool) -> State {
+        State {
+            peer_main,
+            sending,
+            receiving,
+            ..State::default()
+        }
+    }
+
+    fn motion(dx: f64, dy: f64) -> Event {
+        Event::Pointer(PointerEvent::Motion { time: 0, dx, dy })
+    }
+
+    #[test]
+    fn small_motions_are_not_lost() {
+        let mut st = State {
+            pointer_speed: 1.0,
+            ..State::default()
+        };
+        // 10 mouvements de 0,6 pixel = 6 pixels envoyés au total.
+        let mut total = 0.0;
+        for _ in 0..10 {
+            if let Some(Event::Pointer(PointerEvent::Motion { dx, .. })) =
+                scale_motion(&mut st, motion(0.6, 0.0))
+            {
+                assert_eq!(dx.fract(), 0.0, "pixels entiers uniquement");
+                total += dx;
+            }
+        }
+        assert_eq!(total, 6.0);
+    }
+
+    #[test]
+    fn speed_multiplies_motion_and_keeps_direction() {
+        let mut st = State {
+            pointer_speed: 2.5,
+            ..State::default()
+        };
+        assert_eq!(
+            scale_motion(&mut st, motion(4.0, -2.0)),
+            Some(motion(10.0, -5.0))
+        );
+        // Les autres événements passent tels quels.
+        let key = Event::Keyboard(KeyboardEvent::Key {
+            time: 0,
+            key: 30,
+            state: 1,
+        });
+        assert_eq!(scale_motion(&mut st, key), Some(key));
+    }
+
+    #[test]
+    fn secondary_pc_always_sends_sound_to_main() {
+        let cfg = config(false, Mode::Always, Mode::Auto);
+        assert_eq!(
+            audio_directions(&cfg, &state(true, false, false)),
+            (true, false)
+        );
+        // Mode « auto » : seulement quand le PC principal le contrôle.
+        let cfg = config(false, Mode::Auto, Mode::Auto);
+        assert_eq!(
+            audio_directions(&cfg, &state(true, false, false)),
+            (false, false)
+        );
+        assert_eq!(
+            audio_directions(&cfg, &state(true, false, true)),
+            (true, false)
+        );
+    }
+
+    #[test]
+    fn main_pc_never_sends_sound_but_sends_mic() {
+        let cfg = config(true, Mode::Always, Mode::Always);
+        assert_eq!(
+            audio_directions(&cfg, &state(false, false, false)),
+            (false, true)
+        );
+        let cfg = config(true, Mode::Always, Mode::Auto);
+        assert_eq!(
+            audio_directions(&cfg, &state(false, true, false)),
+            (false, true)
+        );
+        assert_eq!(
+            audio_directions(&cfg, &state(false, false, false)),
+            (false, false)
+        );
+    }
+
+    #[test]
+    fn without_main_pc_sound_follows_control_to_avoid_echo() {
+        for main in [false, true] {
+            let cfg = config(main, Mode::Always, Mode::Always);
+            // Jamais les deux PC en même temps : chacun ne peut être que contrôlé ou contrôleur.
+            assert_eq!(
+                audio_directions(&cfg, &state(main, false, false)),
+                (false, false)
+            );
+            assert_eq!(
+                audio_directions(&cfg, &state(main, false, true)),
+                (true, false)
+            );
+            assert_eq!(
+                audio_directions(&cfg, &state(main, true, false)),
+                (false, true)
+            );
+        }
     }
 }

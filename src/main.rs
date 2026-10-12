@@ -72,12 +72,23 @@ struct Cli {
     #[arg(long, global = true)]
     no_clipboard: bool,
 
-    /// Envoi du son de ce PC à l'autre (auto : quand l'autre PC contrôle celui-ci).
-    #[arg(long, value_enum, global = true, default_value = "auto")]
+    /// Vitesse de la souris sur l'autre PC (1 = identique, 2 = deux fois plus rapide).
+    #[arg(long, global = true, default_value_t = 1.0, value_parser = parse_speed)]
+    pointer_speed: f64,
+
+    /// Ce PC est le PC principal (souris, clavier et casque) : il reçoit le son de l'autre
+    /// en permanence et peut lui envoyer son micro.
+    #[arg(long, global = true)]
+    main: bool,
+
+    /// Envoi du son de ce PC à l'autre (auto : quand l'autre PC contrôle celui-ci ;
+    /// always : en permanence vers le PC principal).
+    #[arg(long, value_enum, global = true, default_value = "always")]
     sound: audio::Mode,
 
-    /// Envoi du micro de ce PC à l'autre (auto : quand ce PC contrôle l'autre).
-    #[arg(long, value_enum, global = true, default_value = "off")]
+    /// Envoi du micro de ce PC à l'autre (auto : quand ce PC contrôle l'autre ;
+    /// always : en permanence depuis le PC principal).
+    #[arg(long, value_enum, global = true, default_value = "always")]
     mic: audio::Mode,
 
     /// Source du son à envoyer (par défaut : la sortie audio principale).
@@ -92,8 +103,8 @@ struct Cli {
     #[arg(long, global = true, value_name = "PÉRIPHÉRIQUE")]
     sound_output: Option<String>,
 
-    /// Sortie où jouer le micro reçu de l'autre PC, par exemple un câble audio virtuel
-    /// (« CABLE Input », « BlackHole »…) pour l'utiliser comme micro dans les applications.
+    /// Sortie où jouer le micro reçu de l'autre PC (par défaut : micro virtuel détecté
+    /// ou créé automatiquement — VB-Cable, BlackHole, « Micro-one-mouse » sous Linux).
     #[arg(long, global = true, value_name = "PÉRIPHÉRIQUE")]
     mic_output: Option<String>,
 }
@@ -192,7 +203,9 @@ async fn run(cli: Cli, mode: Mode) -> Result<()> {
         psk,
         name,
         peer_side: cli.side.into(),
+        pointer_speed: cli.pointer_speed,
         audio: AudioConfig {
+            main: cli.main,
             sound: cli.sound,
             mic: cli.mic,
             sound_device: cli.sound_device,
@@ -262,6 +275,18 @@ async fn serve(mode: &Mode, local: &mut Local) -> Result<()> {
                 tokio::time::sleep(RECONNECT_DELAY).await;
             }
         }
+    }
+}
+
+fn parse_speed(text: &str) -> Result<f64, String> {
+    let speed: f64 = text
+        .replace(',', ".")
+        .parse()
+        .map_err(|_| format!("« {text} » n'est pas un nombre"))?;
+    if (0.1..=10.0).contains(&speed) {
+        Ok(speed)
+    } else {
+        Err("la vitesse doit être comprise entre 0,1 et 10".into())
     }
 }
 

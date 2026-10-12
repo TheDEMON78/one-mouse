@@ -327,44 +327,71 @@ impl App {
             ui.add(egui::TextEdit::singleline(&mut s.name).hint_text("nom de l'ordinateur"));
         });
 
+        ui.horizontal(|ui| {
+            ui.label("Vitesse de la souris sur l'autre PC :");
+            ui.add(
+                egui::Slider::new(&mut s.pointer_speed, 0.25..=4.0)
+                    .logarithmic(true)
+                    .fixed_decimals(2)
+                    .prefix("×"),
+            );
+            if ui.small_button("1×").clicked() {
+                s.pointer_speed = 1.0;
+            }
+        });
+
         ui.add_space(8.0);
         ui.heading("Son et micro");
-        mode_combo(
-            ui,
-            "sound",
-            "Son de ce PC envoyé :",
-            &mut s.sound,
-            "quand l'autre PC le contrôle",
+        ui.checkbox(
+            &mut s.main,
+            "Ce PC est mon PC principal (souris, clavier et casque branchés dessus)",
         );
-        mode_combo(
-            ui,
-            "mic",
-            "Micro de ce PC envoyé :",
-            &mut s.mic,
-            "quand il contrôle l'autre PC",
-        );
-        output_combo(
-            ui,
-            "sound_output",
-            "Son reçu joué sur :",
-            &mut s.sound_output,
-            &self.outputs,
-        );
-        output_combo(
-            ui,
-            "mic_output",
-            "Micro reçu joué sur :",
-            &mut s.mic_output,
-            &self.outputs,
-        );
-        ui.label(
-            egui::RichText::new(
-                "Pour utiliser le micro reçu dans Discord ou Teams, choisissez un câble audio \
-                 virtuel (VB-Cable, BlackHole).",
-            )
-            .small()
-            .weak(),
-        );
+        if s.main {
+            ui.label(
+                egui::RichText::new("Le son de l'autre PC est joué ici, en permanence.")
+                    .small()
+                    .weak(),
+            );
+            output_combo(
+                ui,
+                "sound_output",
+                "Son de l'autre PC joué sur :",
+                &mut s.sound_output,
+                &self.outputs,
+            );
+            mode_combo(
+                ui,
+                "mic",
+                "Mon micro envoyé à l'autre PC :",
+                &mut s.mic,
+                "quand je le contrôle",
+            );
+        } else {
+            mode_combo(
+                ui,
+                "sound",
+                "Son de ce PC envoyé :",
+                &mut s.sound,
+                "quand l'autre PC le contrôle",
+            );
+            output_combo(
+                ui,
+                "mic_output",
+                "Micro de l'autre PC envoyé vers :",
+                &mut s.mic_output,
+                &self.outputs,
+            );
+            ui.label(
+                egui::RichText::new(
+                    "Cochez « PC principal » sur le PC où vous écoutez (un seul des deux). \
+                     Le micro du PC principal devient un micro de ce PC : choisissez \
+                     « Micro-one-mouse » (Linux), « CABLE Output » (VB-Cable, Windows) ou \
+                     BlackHole (macOS) comme micro dans vos applications.",
+                )
+                .small()
+                .weak(),
+            );
+        }
 
         ui.add_space(8.0);
         ui.heading("Options");
@@ -395,8 +422,14 @@ fn mode_combo(ui: &mut egui::Ui, id: &str, label: &str, mode: &mut Mode, auto: &
 }
 
 fn output_combo(ui: &mut egui::Ui, id: &str, label: &str, value: &mut String, outputs: &[String]) {
+    // Vide = choix automatique : sortie principale pour le son, micro virtuel pour le micro.
+    let automatic = if id == "mic_output" {
+        "micro virtuel (automatique)"
+    } else {
+        "sortie par défaut"
+    };
     let shown = if value.is_empty() {
-        "sortie par défaut".to_owned()
+        automatic.to_owned()
     } else {
         value.clone()
     };
@@ -406,7 +439,7 @@ fn output_combo(ui: &mut egui::Ui, id: &str, label: &str, value: &mut String, ou
             .selected_text(shown)
             .width(220.0)
             .show_ui(ui, |ui| {
-                ui.selectable_value(value, String::new(), "sortie par défaut");
+                ui.selectable_value(value, String::new(), automatic);
                 for name in outputs {
                     ui.selectable_value(value, name.clone(), name);
                 }

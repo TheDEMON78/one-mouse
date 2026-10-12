@@ -49,19 +49,23 @@ one-mouse --side left --password "mon mot de passe" connect 192.168.1.10   # sec
 
 Le mot de passe peut aussi passer par la variable `ONE_MOUSE_PASSWORD`. `one-mouse --help` liste toutes les options.
 
-### Son et micro
+### Son, micro et vitesse de la souris
 
-- **Son** : par défaut (`--sound auto`), le PC contrôlé envoie son son au PC qui le contrôle. Vous entendez donc
-  l'autre PC dans votre casque dès que le curseur y passe. `--sound always` l'envoie en permanence,
-  `--sound off` jamais.
-- **Micro** : `--mic auto` envoie votre micro à l'autre PC quand vous le contrôlez, `--mic always` en permanence.
-  Pour que les applications de l'autre PC (Discord, Teams…) l'utilisent comme micro, jouez-le dans un câble
-  audio virtuel avec `--mic-output` : [VB-Cable](https://vb-audio.com/Cable/) sous Windows (`--mic-output "CABLE Input"`),
-  [BlackHole](https://existential.audio/blackhole/) sous macOS, ou un `null-sink` PulseAudio/PipeWire sous Linux.
-- `one-mouse audio-devices` liste les périphériques, à utiliser avec `--sound-device`, `--mic-device`,
-  `--sound-output` et `--mic-output` (nom complet ou partiel).
-- Capture du son système : Windows, macOS 14.6 et plus (autoriser l'enregistrement audio), Linux avec
-  PulseAudio ou PipeWire.
+- **PC principal** : cochez « Ce PC est mon PC principal » sur le PC où sont branchés la souris, le clavier et le
+  casque (un seul des deux, option `--main`). L'autre PC lui envoie alors son son **en permanence**, que la souris
+  soit dessus ou non.
+- **Micro** : le micro du PC principal est envoyé à l'autre PC et y devient un micro utilisable par les applications
+  (Discord, Teams…). Sous Linux, one-mouse crée lui-même le micro virtuel « Micro-one-mouse ». Sous Windows et macOS,
+  un micro virtuel demande un pilote : installez [VB-Cable](https://vb-audio.com/Cable/) (choisissez ensuite
+  « CABLE Output » comme micro) ou [BlackHole](https://existential.audio/blackhole/), détectés automatiquement.
+  Sans micro virtuel, le micro reçu n'est pas joué sur les haut-parleurs (il reviendrait en écho).
+- Sans PC principal, le son n'est envoyé que par le PC contrôlé, et le micro que par celui qui contrôle : un seul sens
+  à la fois, donc jamais d'écho.
+- Qualité : son 16 bits non compressé, rééchantillonnage cubique et compensation de la dérive entre les cartes son.
+- **Vitesse de la souris** sur l'autre PC : réglage de ×0,25 à ×4 (`--pointer-speed`), si les deux PC n'ont pas la
+  même sensibilité.
+- `one-mouse audio-devices` liste les périphériques (`--sound-device`, `--mic-device`, `--sound-output`,
+  `--mic-output`). Capture du son système : Windows, macOS 14.6 et plus, Linux avec PulseAudio ou PipeWire.
 
 ### Permissions par système
 

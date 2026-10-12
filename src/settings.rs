@@ -63,13 +63,23 @@ pub struct Settings {
     pub password: String,
     pub name: String,
     pub clipboard: bool,
+    /// PC principal : souris, clavier et casque branchés dessus.
+    pub main: bool,
+    /// Vitesse de la souris sur l'autre PC.
+    pub pointer_speed: f64,
     pub sound: audio::Mode,
     pub mic: audio::Mode,
     pub sound_output: String,
     pub mic_output: String,
     /// Démarre le partage dès l'ouverture de la fenêtre.
     pub start_sharing: bool,
+    /// Version du format, pour adapter les anciens réglages (absent = ancien format 0).
+    #[serde(default)]
+    pub format: u32,
 }
+
+/// Format actuel des réglages.
+const FORMAT: u32 = 3;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -80,11 +90,14 @@ impl Default for Settings {
             password: String::new(),
             name: String::new(),
             clipboard: true,
-            sound: audio::Mode::Auto,
-            mic: audio::Mode::Off,
+            main: false,
+            pointer_speed: 1.0,
+            sound: audio::Mode::Always,
+            mic: audio::Mode::Always,
             sound_output: String::new(),
             mic_output: String::new(),
             start_sharing: false,
+            format: FORMAT,
         }
     }
 }
@@ -96,10 +109,26 @@ impl Settings {
     }
 
     pub fn load() -> Self {
-        Self::path()
+        let mut settings: Self = Self::path()
             .and_then(|path| std::fs::read(path).ok())
             .and_then(|data| serde_json::from_slice(&data).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        settings.migrate();
+        settings
+    }
+
+    /// Adapte les réglages enregistrés par une version précédente.
+    fn migrate(&mut self) {
+        if self.format < 2 && self.sound == audio::Mode::Auto {
+            // Avant le « PC principal », « auto » était le défaut : le son est maintenant
+            // envoyé en permanence vers le PC principal.
+            self.sound = audio::Mode::Always;
+        }
+        if self.format < 3 && self.mic == audio::Mode::Off {
+            // Le micro du PC principal est maintenant envoyé par défaut à l'autre PC.
+            self.mic = audio::Mode::Always;
+        }
+        self.format = FORMAT;
     }
 
     pub fn save(&self) -> Result<()> {
@@ -143,6 +172,13 @@ impl Settings {
         if !self.clipboard {
             args.push("--no-clipboard".to_owned());
         }
+        if self.main {
+            args.push("--main".to_owned());
+        }
+        if self.pointer_speed != 1.0 {
+            args.push("--pointer-speed".to_owned());
+            args.push(format!("{:.2}", self.pointer_speed));
+        }
         if self.connect {
             args.push("connect".to_owned());
             args.push(self.address.trim().to_owned());
@@ -163,7 +199,7 @@ mod tests {
         assert_eq!(
             settings.engine_args(),
             [
-                "--status", "--side", "right", "--sound", "auto", "--mic", "off", "listen"
+                "--status", "--side", "right", "--sound", "always", "--mic", "always", "listen"
             ]
         );
     }
@@ -177,6 +213,7 @@ mod tests {
             mic: audio::Mode::Auto,
             mic_output: "CABLE Input".into(),
             clipboard: false,
+            main: true,
             ..Settings::default()
         };
         assert_eq!(
@@ -186,12 +223,13 @@ mod tests {
                 "--side",
                 "left",
                 "--sound",
-                "auto",
+                "always",
                 "--mic",
                 "auto",
                 "--mic-output",
                 "CABLE Input",
                 "--no-clipboard",
+                "--main",
                 "connect",
                 "192.168.1.20"
             ]
@@ -203,5 +241,17 @@ mod tests {
         let settings: Settings = serde_json::from_str(r#"{"password":"secret123"}"#).unwrap();
         assert_eq!(settings.password, "secret123");
         assert_eq!(settings.side, Side::Right);
+    }
+
+    #[test]
+    fn old_auto_sound_becomes_always() {
+        let mut settings: Settings = serde_json::from_str(r#"{"sound":"auto"}"#).unwrap();
+        settings.migrate();
+        assert_eq!(settings.sound, audio::Mode::Always);
+        // Un choix fait avec le format actuel est respecté.
+        let mut settings: Settings =
+            serde_json::from_str(r#"{"sound":"auto","format":3}"#).unwrap();
+        settings.migrate();
+        assert_eq!(settings.sound, audio::Mode::Auto);
     }
 }

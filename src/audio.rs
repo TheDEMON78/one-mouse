@@ -23,10 +23,19 @@ use tokio::sync::mpsc;
 
 /// Durée d'un paquet audio envoyé sur le réseau.
 const FRAME_MS: u32 = 10;
-/// Son accumulé avant de démarrer (ou redémarrer) la lecture.
-const PRIME_MS: u32 = 60;
+/// Tampon visé côté lecture : son accumulé avant de démarrer, et niveau que la
+/// compensation de dérive cherche à maintenir (absorbe les à-coups du Wi-Fi).
+const TARGET_MS: u32 = 80;
 /// Au-delà de ce retard, le son en trop est jeté pour rester synchrone.
-const MAX_BUFFER_MS: u32 = 200;
+const MAX_BUFFER_MS: u32 = 400;
+/// Tampon demandé à la carte son (capture et lecture).
+const DEVICE_BUFFER_MS: u32 = 20;
+/// Correction maximale de la vitesse de lecture (0,2 % : imperceptible). Suffit
+/// largement pour la dérive entre deux cartes son (quelques centièmes de %).
+const MAX_DRIFT_CORRECTION: f64 = 0.002;
+/// Au-delà de ce remplissage (en multiple de la cible), le retard est rattrapé
+/// d'un coup plutôt que par la correction de vitesse, qui serait trop lente.
+const RESYNC_LEVEL: f64 = 2.0;
 
 /// Quand partager le son du système ou le micro.
 #[derive(
@@ -38,7 +47,7 @@ pub enum Mode {
     Off,
     /// Son : quand l'autre PC contrôle celui-ci. Micro : quand ce PC contrôle l'autre.
     Auto,
-    /// Tout le temps, tant que les deux PC sont connectés.
+    /// Tout le temps, si l'un des deux PC est le PC principal (sinon comme « auto »).
     Always,
 }
 
@@ -65,6 +74,8 @@ impl Mode {
 /// Réglages audio choisis en ligne de commande.
 #[derive(Debug, Clone)]
 pub struct AudioConfig {
+    /// PC principal (souris, clavier, casque) : reçoit le son de l'autre PC.
+    pub main: bool,
     pub sound: Mode,
     pub mic: Mode,
     /// Source du son du système (par défaut : la sortie audio principale).
@@ -153,6 +164,75 @@ pub fn output_names() -> Vec<String> {
     let mut names: Vec<String> = devices.map(|d| device_label(&d)).collect();
     names.dedup();
     names
+}
+
+/// Sortie à utiliser pour faire du micro reçu un micro utilisable par les applications.
+///
+/// - Linux : crée (une seule fois) un micro virtuel « Micro one-mouse » avec
+///   PulseAudio / PipeWire : une sortie `one_mouse_mic` dont le son ressort par
+///   la source `one_mouse_micro`, à choisir comme micro dans Discord, Teams…
+/// - Windows / macOS : un micro virtuel demande un pilote ; on utilise VB-Cable
+///   ou BlackHole s'ils sont installés.
+///
+/// `None` : aucun micro virtuel, le micro reçu ne doit pas être joué sur les
+/// haut-parleurs (il serait recapturé avec le son et renvoyé : écho).
+pub fn virtual_mic_output() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    if let Some(sink) = linux_virtual_mic() {
+        return Some(sink);
+    }
+    const KNOWN: [&str; 4] = ["CABLE Input", "VB-Audio", "BlackHole", "Loopback Audio"];
+    let outputs = output_names();
+    KNOWN.iter().find_map(|known| {
+        outputs
+            .iter()
+            .find(|name| name.to_lowercase().contains(&known.to_lowercase()))
+            .cloned()
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_virtual_mic() -> Option<String> {
+    use std::process::Command;
+    const SINK: &str = "one_mouse_mic";
+    const SOURCE: &str = "one_mouse_micro";
+    let pactl = |args: &[&str]| Command::new("pactl").args(args).output().ok();
+    let listed = |kind: &str, name: &str| {
+        pactl(&["list", "short", kind]).is_some_and(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .any(|line| line.split_whitespace().nth(1) == Some(name))
+        })
+    };
+    if !listed("sinks", SINK) {
+        let ok = pactl(&[
+            "load-module",
+            "module-null-sink",
+            &format!("sink_name={SINK}"),
+            "sink_properties=device.description=one-mouse-micro-interne",
+        ])
+        .is_some_and(|out| out.status.success());
+        if !ok {
+            return None;
+        }
+    }
+    if !listed("sources", SOURCE) {
+        let ok = pactl(&[
+            "load-module",
+            "module-remap-source",
+            &format!("master={SINK}.monitor"),
+            &format!("source_name={SOURCE}"),
+            "source_properties=device.description=Micro-one-mouse",
+        ])
+        .is_some_and(|out| out.status.success());
+        if !ok {
+            return None;
+        }
+        log::info!(
+            "micro virtuel « Micro-one-mouse » créé : choisissez-le comme micro dans vos applications"
+        );
+    }
+    Some(SINK.to_owned())
 }
 
 fn id_string(device: &Device) -> String {
@@ -260,11 +340,11 @@ impl AudioCapture {
     }
 }
 
-/// Configuration à faible latence : tampon de ~10 ms au lieu de la valeur par défaut,
+/// Configuration à faible latence : tampon de ~20 ms au lieu de la valeur par défaut,
 /// qui atteint plusieurs secondes avec PulseAudio.
 fn low_latency(config: &SupportedStreamConfig) -> StreamConfig {
     let mut stream_config = config.config();
-    let wanted = stream_config.sample_rate * FRAME_MS / 1000;
+    let wanted = stream_config.sample_rate * DEVICE_BUFFER_MS / 1000;
     stream_config.buffer_size = match *config.buffer_size() {
         SupportedBufferSize::Range { min, max } => BufferSize::Fixed(wanted.clamp(min, max)),
         SupportedBufferSize::Unknown => BufferSize::Fixed(wanted),
@@ -386,6 +466,8 @@ impl PlayBuffer {
 pub struct AudioPlayer {
     buffer: Arc<Mutex<PlayBuffer>>,
     converter: Converter,
+    /// Remplissage du tampon lissé, en proportion de la cible (1.0 = à la cible).
+    fill: f64,
     _stop: std_mpsc::Sender<()>,
 }
 
@@ -414,7 +496,7 @@ impl AudioPlayer {
                     let buffer = Arc::new(Mutex::new(PlayBuffer {
                         samples: VecDeque::new(),
                         primed: false,
-                        prime_len: per_ms * PRIME_MS as usize,
+                        prime_len: per_ms * TARGET_MS as usize,
                         max_len: per_ms * MAX_BUFFER_MS as usize,
                         channels: channels as usize,
                     }));
@@ -440,16 +522,38 @@ impl AudioPlayer {
         Ok(Self {
             buffer,
             converter: Converter::new(rate, channels),
+            fill: 1.0,
             _stop: stop_tx,
         })
     }
 
     pub fn push(&mut self, frame: &AudioFrame) {
-        let converted = self.converter.convert(frame);
-        if let Ok(mut buffer) = self.buffer.lock() {
-            buffer.push(&converted);
+        let Ok(mut buffer) = self.buffer.lock() else {
+            return;
+        };
+        // Compensation de dérive : tampon trop rempli → lecture un peu plus rapide,
+        // trop vide → un peu plus lente. Lissé pour ne pas moduler la hauteur du son.
+        if buffer.primed {
+            let level = buffer.samples.len() as f64 / buffer.prime_len as f64;
+            if level > RESYNC_LEVEL {
+                // Gros retard (rafale réseau, démarrage) : retour direct à la cible.
+                let excess = buffer.samples.len() - buffer.prime_len;
+                let excess = excess - excess % buffer.channels;
+                buffer.samples.drain(..excess);
+                self.fill = 1.0;
+            } else {
+                self.fill = 0.98 * self.fill + 0.02 * level;
+            }
         }
+        let speed = drift_speed(self.fill);
+        let converted = self.converter.convert(frame, speed);
+        buffer.push(&converted);
     }
+}
+
+/// Vitesse de lecture selon le remplissage lissé du tampon (1.0 = à la cible).
+fn drift_speed(fill: f64) -> f64 {
+    1.0 + ((fill - 1.0) * MAX_DRIFT_CORRECTION).clamp(-MAX_DRIFT_CORRECTION, MAX_DRIFT_CORRECTION)
 }
 
 fn build_output(
@@ -508,18 +612,24 @@ where
     Ok(stream)
 }
 
-/// Convertit le son reçu vers la fréquence et le nombre de canaux de la sortie
-/// (interpolation linéaire, état conservé d'un paquet à l'autre).
+/// Convertit le son reçu vers la fréquence et le nombre de canaux de la sortie.
+///
+/// Interpolation cubique (Catmull-Rom), état conservé d'un paquet à l'autre.
+/// `speed` accélère ou ralentit très légèrement la lecture pour compenser la
+/// dérive entre l'horloge de la carte son qui capture et celle qui joue.
 struct Converter {
     out_rate: u32,
     out_channels: usize,
     in_rate: u32,
     in_channels: usize,
-    /// Dernière trame du paquet précédent, pour interpoler à la jonction.
-    prev: Vec<f32>,
-    /// Position de lecture dans le paquet courant (en trames, -1 = `prev`).
+    /// Trois dernières trames du paquet précédent (entrelacées).
+    history: Vec<f32>,
+    /// Position de lecture, en trames, dans `history` + paquet courant.
     pos: f64,
 }
+
+/// Trames gardées d'un paquet à l'autre pour l'interpolation.
+const HISTORY: usize = 3;
 
 impl Converter {
     fn new(out_rate: u32, out_channels: u16) -> Self {
@@ -528,20 +638,20 @@ impl Converter {
             out_channels: out_channels as usize,
             in_rate: 0,
             in_channels: 0,
-            prev: Vec::new(),
-            pos: 0.0,
+            history: Vec::new(),
+            pos: HISTORY as f64,
         }
     }
 
-    fn convert(&mut self, frame: &AudioFrame) -> Vec<f32> {
+    fn convert(&mut self, frame: &AudioFrame, speed: f64) -> Vec<f32> {
         let in_channels = frame.channels as usize;
+        let out_ch = self.out_channels;
         if frame.rate != self.in_rate || in_channels != self.in_channels {
             self.in_rate = frame.rate;
             self.in_channels = in_channels;
-            self.prev.clear();
-            self.pos = 0.0;
+            self.history.clear();
+            self.pos = HISTORY as f64;
         }
-        let out_ch = self.out_channels;
 
         // 1. Canaux : conversion vers le nombre de canaux de la sortie.
         let mapped: Vec<f32> = frame
@@ -558,42 +668,52 @@ impl Converter {
                 })
             })
             .collect();
-
-        // 2. Fréquence : interpolation linéaire.
-        if frame.rate == self.out_rate {
-            return mapped;
-        }
         let frames = mapped.len() / out_ch;
         if frames == 0 {
             return Vec::new();
         }
-        if self.prev.is_empty() {
-            self.prev = mapped[..out_ch].to_vec();
+        if self.history.is_empty() {
+            self.history = mapped[..out_ch].repeat(HISTORY);
         }
-        let step = frame.rate as f64 / self.out_rate as f64;
-        let at = |i: isize, c: usize| -> f32 {
-            if i < 0 {
-                self.prev[c]
-            } else {
-                mapped[i as usize * out_ch + c]
-            }
-        };
+
+        // 2. Même fréquence et pas de correction : copie directe.
+        if frame.rate == self.out_rate && speed == 1.0 {
+            self.history.extend_from_slice(&mapped);
+            let excess = self.history.len() - HISTORY * out_ch;
+            self.history.drain(..excess);
+            self.pos = HISTORY as f64;
+            return mapped;
+        }
+
+        // 3. Rééchantillonnage cubique sur l'historique suivi du paquet.
+        let mut src = Vec::with_capacity(self.history.len() + mapped.len());
+        src.extend_from_slice(&self.history);
+        src.extend_from_slice(&mapped);
+        let total = src.len() / out_ch;
+        let step = frame.rate as f64 / self.out_rate as f64 * speed;
         let mut out = Vec::with_capacity((frames as f64 / step) as usize * out_ch + out_ch);
-        while self.pos < (frames - 1) as f64 {
-            let i = self.pos.floor();
-            let frac = (self.pos - i) as f32;
-            let i = i as isize;
+        while self.pos < (total - 2) as f64 {
+            let i = self.pos.floor() as usize;
+            let t = (self.pos - i as f64) as f32;
             for c in 0..out_ch {
-                let a = at(i, c);
-                let b = at(i + 1, c);
-                out.push(a + (b - a) * frac);
+                let p = |k: usize| src[k * out_ch + c];
+                out.push(catmull_rom(p(i - 1), p(i), p(i + 1), p(i + 2), t));
             }
             self.pos += step;
         }
-        self.pos -= frames as f64;
-        self.prev = mapped[(frames - 1) * out_ch..].to_vec();
+        self.pos -= (total - HISTORY) as f64;
+        self.history = src[(total - HISTORY) * out_ch..].to_vec();
         out
     }
+}
+
+fn catmull_rom(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    0.5 * (2.0 * p1
+        + (p2 - p0) * t
+        + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+        + (3.0 * p1 - p0 - 3.0 * p2 + p3) * t3)
 }
 
 #[cfg(test)]
@@ -611,16 +731,22 @@ mod tests {
     #[test]
     fn same_format_is_unchanged() {
         let mut conv = Converter::new(48_000, 2);
-        let out = conv.convert(&frame(48_000, 2, vec![16384, -16384, 0, 8192]));
+        let out = conv.convert(&frame(48_000, 2, vec![16384, -16384, 0, 8192]), 1.0);
         assert_eq!(out, vec![0.5, -0.5, 0.0, 0.25]);
     }
 
     #[test]
     fn mono_to_stereo_and_back() {
         let mut conv = Converter::new(48_000, 2);
-        assert_eq!(conv.convert(&frame(48_000, 1, vec![16384])), vec![0.5, 0.5]);
+        assert_eq!(
+            conv.convert(&frame(48_000, 1, vec![16384]), 1.0),
+            vec![0.5, 0.5]
+        );
         let mut conv = Converter::new(48_000, 1);
-        assert_eq!(conv.convert(&frame(48_000, 2, vec![16384, 0])), vec![0.25]);
+        assert_eq!(
+            conv.convert(&frame(48_000, 2, vec![16384, 0]), 1.0),
+            vec![0.25]
+        );
     }
 
     #[test]
@@ -629,9 +755,61 @@ mod tests {
         let mut conv = Converter::new(48_000, 1);
         let mut total = 0;
         for _ in 0..100 {
-            total += conv.convert(&frame(44_100, 1, vec![1000; 441])).len();
+            total += conv.convert(&frame(44_100, 1, vec![1000; 441]), 1.0).len();
         }
         assert!((47_990..=48_010).contains(&total), "{total}");
+    }
+
+    /// Sinus de 1 kHz à 44,1 kHz converti en 48 kHz par paquets de 10 ms :
+    /// l'erreur par rapport au sinus idéal reste très faible.
+    #[test]
+    fn resampling_is_accurate() {
+        let freq = 1000.0f64;
+        let mut conv = Converter::new(48_000, 1);
+        let mut out = Vec::new();
+        let mut n = 0usize;
+        for _ in 0..50 {
+            let samples = (0..441)
+                .map(|_| {
+                    let v = (2.0 * std::f64::consts::PI * freq * n as f64 / 44_100.0).sin();
+                    n += 1;
+                    (v * 16384.0) as i16
+                })
+                .collect();
+            out.extend(conv.convert(&frame(44_100, 1, samples), 1.0));
+        }
+        let mut max_err = 0.0f64;
+        for (k, &v) in out.iter().enumerate().skip(100).take(40_000) {
+            let t = k as f64 / 48_000.0;
+            let ideal = 0.5 * (2.0 * std::f64::consts::PI * freq * t).sin();
+            max_err = max_err.max((v as f64 - ideal).abs());
+        }
+        assert!(max_err < 0.01, "erreur max {max_err}");
+    }
+
+    #[test]
+    fn drift_correction_is_bounded() {
+        assert_eq!(drift_speed(1.0), 1.0);
+        assert!(drift_speed(1.5) > 1.0 && drift_speed(1.5) <= 1.0 + MAX_DRIFT_CORRECTION);
+        assert!(drift_speed(0.5) < 1.0 && drift_speed(0.5) >= 1.0 - MAX_DRIFT_CORRECTION);
+        assert_eq!(drift_speed(100.0), 1.0 + MAX_DRIFT_CORRECTION);
+    }
+
+    #[test]
+    fn faster_speed_produces_fewer_samples() {
+        let mut normal = Converter::new(48_000, 1);
+        let mut fast = Converter::new(48_000, 1);
+        let (mut a, mut b) = (0, 0);
+        for _ in 0..100 {
+            a += normal
+                .convert(&frame(48_000, 1, vec![1000; 480]), 1.0)
+                .len();
+            b += fast
+                .convert(&frame(48_000, 1, vec![1000; 480]), 1.002)
+                .len();
+        }
+        assert_eq!(a, 48_000);
+        assert!((47_880..=47_920).contains(&b), "{b}");
     }
 
     #[test]
