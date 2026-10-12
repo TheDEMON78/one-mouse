@@ -320,13 +320,18 @@ async fn on_message(
             status::emit(Status::Receiving);
         }
         Message::Input(event) if state.receiving => {
-            local.emulation.consume(event.into(), PEER).await?;
+            // Un événement impossible à rejouer (touche inconnue…) ne coupe pas la connexion.
+            if let Err(e) = local.emulation.consume(event.into(), PEER).await {
+                log::warn!("événement non rejoué : {e}");
+            }
         }
         Message::Input(_) => {}
         Message::Exit => {
             state.receiving = false;
             status::emit(Status::Connected(state.peer_name.clone()));
-            local.emulation.release_keys(PEER).await?;
+            if let Err(e) = local.emulation.release_keys(PEER).await {
+                log::warn!("relâchement des touches impossible : {e}");
+            }
         }
         Message::Leave => {
             if let Some(capture) = &mut local.capture

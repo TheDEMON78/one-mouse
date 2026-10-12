@@ -126,15 +126,22 @@ fn main() -> Result<()> {
     if cli.status {
         status::enable();
     }
-    // Les backends de capture (notamment macOS) attendent un runtime mono-thread.
-    let result = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?
-        .block_on(run(cli, mode));
+    let result = block_on(run(cli, mode)).and_then(|r| r);
     if let Err(e) = &result {
         status::emit(Status::Error(format!("{e:#}")));
     }
     result
+}
+
+/// Exécute le moteur. Les backends de capture et d'émulation (Windows, macOS,
+/// Wayland) lancent des tâches avec `tokio::task::spawn_local` (répétition des
+/// touches, boucle de capture) : il leur faut un runtime mono-thread *et* un
+/// `LocalSet`, sinon le moteur plante dès la première touche.
+fn block_on<F: std::future::Future>(future: F) -> Result<F::Output> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    Ok(runtime.block_on(tokio::task::LocalSet::new().run_until(future)))
 }
 
 /// Application graphique sous Windows : en ligne de commande, la sortie est
@@ -285,4 +292,17 @@ fn default_name() -> String {
         })
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| "pc".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reproduit l'appel des backends à chaque touche (répétition automatique).
+    #[test]
+    fn engine_runtime_supports_spawn_local() {
+        let value =
+            block_on(async { tokio::task::spawn_local(async { 42 }).await.unwrap() }).unwrap();
+        assert_eq!(value, 42);
+    }
 }
