@@ -1,10 +1,36 @@
 [package]
 name = "one-mouse"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 description = "Une seule souris et un seul clavier pour deux PC (Windows, Linux, macOS)"
+authors = ["BloopStudio"]
 license = "GPL-3.0-or-later"
 repository = "https://github.com/TheDEMON78/one-mouse-for-two-pc"
+
+# Installateurs (cargo-packager). La version est injectée par scripts/version.sh.
+[package.metadata.packager]
+product-name = "one-mouse"
+identifier = "com.bloopstudio.onemouse"
+publisher = "BloopStudio"
+authors = ["BloopStudio"]
+copyright = "Copyright © BloopStudio"
+description = "Une seule souris et un seul clavier pour deux PC"
+long-description = "Partage la souris, le clavier et le presse-papier entre deux PC posés côte à côte, sans partage d'écran."
+homepage = "https://github.com/TheDEMON78/one-mouse-for-two-pc"
+license-file = "LICENSE"
+category = "Utility"
+icons = ["assets/icon.png"]
+out-dir = "dist"
+before-packaging-command = "cargo build --release"
+binaries = [{ path = "one-mouse", main = true }]
+
+[package.metadata.packager.nsis]
+installMode = "currentUser"
+languages = ["French", "English"]
+
+[package.metadata.packager.deb]
+section = "utils"
+depends = ["libx11-6", "libxtst6"]
 
 [dependencies]
 anyhow = "1"
