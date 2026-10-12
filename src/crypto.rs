@@ -16,6 +16,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::protocol::Message;
 
+pub const MIN_PASSWORD_LEN: usize = 8;
 const MAGIC: &[u8; 8] = b"OMFTPC01";
 const ARGON2_SALT: &[u8] = b"one-mouse-for-two-pc/psk/v1";
 /// Taille maximale d'une trame chiffrée.
@@ -28,8 +29,8 @@ pub struct Psk([u8; 32]);
 impl Psk {
     pub fn from_password(password: &str) -> Result<Self> {
         ensure!(
-            password.chars().count() >= 8,
-            "le mot de passe doit faire au moins 8 caractères"
+            password.chars().count() >= MIN_PASSWORD_LEN,
+            "le mot de passe doit faire au moins {MIN_PASSWORD_LEN} caractères"
         );
         let mut key = [0u8; 32];
         argon2::Argon2::default()

@@ -1,17 +1,27 @@
 //! one-mouse : une seule souris et un seul clavier pour deux PC posés côte à côte.
+//!
+//! Sans argument, ouvre la fenêtre de réglages ; avec `listen` / `connect`,
+//! lance directement le moteur (c'est aussi ce que fait la fenêtre, dans un
+//! processus séparé).
+
+// Sous Windows : pas de console noire au lancement de l'interface.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod audio;
+mod autostart;
 mod capture;
 mod clipboard;
 mod crypto;
+mod gui;
 mod protocol;
 mod session;
+mod settings;
+mod status;
 
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
-use input_capture::Position;
+use clap::{Parser, Subcommand};
 use input_emulation::InputEmulation;
 use tokio::net::{TcpListener, TcpStream};
 
@@ -20,6 +30,8 @@ use crate::capture::Capture;
 use crate::clipboard::ClipboardSync;
 use crate::crypto::{Psk, Role};
 use crate::session::Local;
+use crate::settings::Side;
+use crate::status::Status;
 
 const DEFAULT_PORT: u16 = 24850;
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
@@ -30,8 +42,13 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(3);
     about = "Une seule souris et un seul clavier pour deux PC (Windows, Linux, macOS)"
 )]
 struct Cli {
+    /// Sans commande : ouvre la fenêtre de réglages.
     #[command(subcommand)]
-    mode: Mode,
+    mode: Option<Mode>,
+
+    /// Écrit les changements d'état sur la sortie standard (utilisé par la fenêtre).
+    #[arg(long, global = true, hide = true)]
+    status: bool,
 
     /// Position de l'autre PC par rapport à celui-ci.
     #[arg(long, value_enum, global = true, default_value = "right")]
@@ -97,37 +114,55 @@ enum Mode {
     AudioDevices,
 }
 
-#[derive(Clone, Copy, ValueEnum)]
-enum Side {
-    Left,
-    Right,
-    Top,
-    Bottom,
+fn main() -> Result<()> {
+    #[cfg(windows)]
+    attach_console();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let mut cli = Cli::parse();
+    let Some(mode) = cli.mode.take() else {
+        return gui::run();
+    };
+    if cli.status {
+        status::enable();
+    }
+    // Les backends de capture (notamment macOS) attendent un runtime mono-thread.
+    let result = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(run(cli, mode));
+    if let Err(e) = &result {
+        status::emit(Status::Error(format!("{e:#}")));
+    }
+    result
 }
 
-impl From<Side> for Position {
-    fn from(side: Side) -> Self {
-        match side {
-            Side::Left => Position::Left,
-            Side::Right => Position::Right,
-            Side::Top => Position::Top,
-            Side::Bottom => Position::Bottom,
-        }
+/// Application graphique sous Windows : en ligne de commande, la sortie est
+/// redirigée vers la console qui l'a lancée.
+#[cfg(windows)]
+fn attach_console() {
+    const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+    unsafe extern "system" {
+        fn AttachConsole(process_id: u32) -> i32;
+    }
+    if std::env::args_os().len() > 1 {
+        // SAFETY : appel Win32 sans pointeur ; échoue sans effet s'il n'y a pas de console.
+        unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
     }
 }
 
-fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let cli = Cli::parse();
-    // Les backends de capture (notamment macOS) attendent un runtime mono-thread.
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?
-        .block_on(run(cli))
+/// Se termine quand la fenêtre qui a lancé le moteur ferme son entrée standard
+/// (arrêt demandé, ou fenêtre fermée / plantée).
+async fn parent_closed() {
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    std::thread::spawn(move || {
+        let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+        let _ = tx.send(());
+    });
+    let _ = rx.await;
 }
 
-async fn run(cli: Cli) -> Result<()> {
-    if let Mode::AudioDevices = cli.mode {
+async fn run(cli: Cli, mode: Mode) -> Result<()> {
+    if let Mode::AudioDevices = mode {
         return audio::list_devices();
     }
     let password = cli
@@ -159,10 +194,15 @@ async fn run(cli: Cli) -> Result<()> {
         },
     };
 
+    let watch_parent = cli.status;
     let result = tokio::select! {
-        r = serve(&cli.mode, &mut local) => r,
+        r = serve(&mode, &mut local) => r,
         _ = tokio::signal::ctrl_c() => {
             log::info!("arrêt demandé");
+            Ok(())
+        }
+        _ = parent_closed(), if watch_parent => {
+            log::info!("arrêt demandé par la fenêtre");
             Ok(())
         }
     };
@@ -187,6 +227,7 @@ async fn serve(mode: &Mode, local: &mut Local) -> Result<()> {
                 session::side_name(local.peer_side)
             );
             loop {
+                status::emit(Status::Listening);
                 let (stream, addr) = listener.accept().await?;
                 log::info!("connexion entrante de {addr}");
                 match session::run(stream, Role::Listener, local).await {
@@ -202,6 +243,7 @@ async fn serve(mode: &Mode, local: &mut Local) -> Result<()> {
                 format!("{host}:{DEFAULT_PORT}")
             };
             loop {
+                status::emit(Status::Connecting);
                 match TcpStream::connect(&addr).await {
                     Ok(stream) => match session::run(stream, Role::Connector, local).await {
                         Ok(()) => log::info!("{addr} s'est déconnecté"),

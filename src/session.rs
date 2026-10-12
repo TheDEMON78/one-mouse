@@ -22,6 +22,7 @@ use crate::capture::Capture;
 use crate::clipboard::ClipboardSync;
 use crate::crypto::{self, Psk, Role};
 use crate::protocol::{self, AudioKind, MAX_CLIPBOARD_LEN, Message};
+use crate::status::{self, Status};
 
 /// Identifiant de l'unique autre PC (la V1 gère une seule connexion).
 const PEER: u64 = 0;
@@ -53,6 +54,8 @@ pub struct Local {
 
 #[derive(Default)]
 struct State {
+    /// Nom de l'autre PC.
+    peer_name: String,
     /// Nos entrées sont capturées et envoyées à l'autre PC.
     sending: bool,
     /// L'autre PC nous envoie ses entrées.
@@ -100,7 +103,8 @@ pub async fn run(stream: TcpStream, role: Role, local: &mut Local) -> Result<()>
     }
     local.emulation.create(PEER).await;
 
-    let result = event_loop(local, &out_tx, &mut in_rx).await;
+    status::emit(Status::Connected(peer_name.clone()));
+    let result = event_loop(local, peer_name, &out_tx, &mut in_rx).await;
 
     // Toujours rendre le curseur et relâcher les touches, même en cas d'erreur.
     if let Some(capture) = &mut local.capture {
@@ -124,10 +128,14 @@ pub async fn run(stream: TcpStream, role: Role, local: &mut Local) -> Result<()>
 
 async fn event_loop(
     local: &mut Local,
+    peer_name: String,
     out: &mpsc::Sender<Message>,
     incoming: &mut mpsc::Receiver<Message>,
 ) -> Result<()> {
-    let mut state = State::default();
+    let mut state = State {
+        peer_name,
+        ..State::default()
+    };
     let mut audio = AudioState::default();
     let mut ping = tokio::time::interval(PING_INTERVAL);
 
@@ -282,6 +290,7 @@ async fn on_capture(
         CaptureEvent::Begin => {
             log::info!("le curseur passe sur l'autre PC");
             state.sending = true;
+            status::emit(Status::Sending);
             send(out, Message::Enter).await?;
         }
         CaptureEvent::Input(_) if !state.sending => {}
@@ -308,6 +317,7 @@ async fn on_message(
         Message::Enter => {
             log::info!("l'autre PC prend le contrôle de celui-ci");
             state.receiving = true;
+            status::emit(Status::Receiving);
         }
         Message::Input(event) if state.receiving => {
             local.emulation.consume(event.into(), PEER).await?;
@@ -315,6 +325,7 @@ async fn on_message(
         Message::Input(_) => {}
         Message::Exit => {
             state.receiving = false;
+            status::emit(Status::Connected(state.peer_name.clone()));
             local.emulation.release_keys(PEER).await?;
         }
         Message::Leave => {
@@ -373,6 +384,7 @@ async fn stop_sending(
     out: &mpsc::Sender<Message>,
 ) -> Result<()> {
     state.sending = false;
+    status::emit(Status::Connected(state.peer_name.clone()));
     let pressed = capture.take_pressed_keys();
     capture.release().await?;
     for key in pressed {

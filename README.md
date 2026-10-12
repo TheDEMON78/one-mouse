@@ -21,26 +21,29 @@ Les installateurs sont générés automatiquement à chaque version, dans les
 
 ## Utilisation
 
-Les deux PC doivent être sur le même réseau local et utiliser **le même mot de passe** (8 caractères minimum).
+Ouvrez **one-mouse** sur les deux PC (même réseau local) :
 
-Sur le premier PC (exemple : l'autre PC est posé **à sa droite**) :
+1. Sur le premier PC, laissez « Ce PC attend l'autre ». Notez l'**adresse de ce PC** affichée en haut de la fenêtre.
+2. Sur le second PC, choisissez « Se connecter à l'autre PC » et saisissez cette adresse.
+3. Sur les deux PC : saisissez le **même mot de passe** (8 caractères minimum), indiquez de quel côté se trouve
+   l'autre PC, puis cliquez sur **Démarrer le partage**.
+
+Poussez ensuite le curseur contre le bord de l'écran situé du côté de l'autre PC pour passer dessus, et contre le bord
+opposé pour revenir. **Raccourci de secours** pour reprendre la main : `Ctrl` + `Maj` + `Alt` + `Méta`
+(touche Windows / Cmd).
+
+Les réglages sont enregistrés. Les options « Démarrer le partage à l'ouverture de one-mouse » et « Lancer one-mouse à
+l'ouverture de session » rendent le partage automatique. Le port utilisé est `24850` (TCP) : autorisez-le dans le
+pare-feu du PC qui attend la connexion.
+
+### En ligne de commande
 
 ```sh
-one-mouse --side right --password "mon mot de passe" listen
+one-mouse --side right --password "mon mot de passe" listen          # premier PC
+one-mouse --side left --password "mon mot de passe" connect 192.168.1.10   # second PC
 ```
 
-Sur le second PC (le premier est donc **à sa gauche**) :
-
-```sh
-one-mouse --side left --password "mon mot de passe" connect 192.168.1.10
-```
-
-- Pour passer sur l'autre PC, poussez le curseur contre le bord de l'écran situé de son côté. Pour revenir, poussez-le
-  contre le bord opposé.
-- **Raccourci de secours** pour reprendre la main : `Ctrl` + `Maj` + `Alt` + `Méta` (touche Windows / Cmd).
-- Le mot de passe peut aussi être passé par la variable d'environnement `ONE_MOUSE_PASSWORD`.
-- `--no-clipboard` désactive le partage du presse-papier. `one-mouse --help` liste toutes les options.
-- Port par défaut : `24850` (TCP). Autorisez-le dans le pare-feu du PC qui écoute (`listen`).
+Le mot de passe peut aussi passer par la variable `ONE_MOUSE_PASSWORD`. `one-mouse --help` liste toutes les options.
 
 ### Son et micro
 

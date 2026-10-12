@@ -29,7 +29,10 @@ const PRIME_MS: u32 = 60;
 const MAX_BUFFER_MS: u32 = 200;
 
 /// Quand partager le son du système ou le micro.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
 pub enum Mode {
     /// Jamais.
     Off,
@@ -40,6 +43,16 @@ pub enum Mode {
 }
 
 impl Mode {
+    pub const ALL: [Mode; 3] = [Mode::Off, Mode::Auto, Mode::Always];
+
+    pub fn arg(self) -> &'static str {
+        match self {
+            Mode::Off => "off",
+            Mode::Auto => "auto",
+            Mode::Always => "always",
+        }
+    }
+
     pub fn wanted(self, active: bool) -> bool {
         match self {
             Mode::Off => false,
@@ -129,6 +142,17 @@ pub fn list_devices() -> Result<()> {
         println!("  - {}  [{}]", device_label(&device), id_string(&device));
     }
     Ok(())
+}
+
+/// Noms des sorties audio, pour les choix de l'interface.
+pub fn output_names() -> Vec<String> {
+    let host = host();
+    let Ok(devices) = host.output_devices() else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = devices.map(|d| device_label(&d)).collect();
+    names.dedup();
+    names
 }
 
 fn id_string(device: &Device) -> String {
