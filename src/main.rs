@@ -12,6 +12,7 @@ mod autostart;
 mod capture;
 mod clipboard;
 mod crypto;
+mod firewall;
 mod gui;
 mod protocol;
 mod session;
@@ -249,11 +250,26 @@ async fn serve(mode: &Mode, local: &mut Local) -> Result<()> {
                         Ok(()) => log::info!("{addr} s'est déconnecté"),
                         Err(e) => log::warn!("connexion avec {addr} terminée : {e:#}"),
                     },
-                    Err(e) => log::warn!("connexion à {addr} impossible : {e}"),
+                    Err(e) => log::warn!("connexion à {addr} impossible : {e}{}", connect_hint(&e)),
                 }
                 tokio::time::sleep(RECONNECT_DELAY).await;
             }
         }
+    }
+}
+
+/// Explication de l'échec d'une connexion, pour l'utilisateur.
+fn connect_hint(error: &std::io::Error) -> &'static str {
+    match error.kind() {
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::HostUnreachable => {
+            " — l'autre PC ne répond pas : vérifiez son adresse, et que son pare-feu autorise \
+             one-mouse (bouton « Autoriser dans le pare-feu » de one-mouse sous Windows, port TCP 24850)"
+        }
+        std::io::ErrorKind::ConnectionRefused => {
+            " — one-mouse n'attend pas de connexion sur l'autre PC : démarrez-y le partage \
+             en mode « Ce PC attend l'autre »"
+        }
+        _ => "",
     }
 }
 

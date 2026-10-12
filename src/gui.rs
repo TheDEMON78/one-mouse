@@ -17,7 +17,7 @@ use eframe::egui;
 use crate::audio::{self, Mode};
 use crate::settings::{Settings, Side};
 use crate::status::Status;
-use crate::{autostart, crypto};
+use crate::{autostart, crypto, firewall};
 
 const ICON_PNG: &[u8] = include_bytes!("../assets/icons/256x256.png");
 const MAX_LOG_LINES: usize = 300;
@@ -175,6 +175,8 @@ struct App {
     engine: Option<Engine>,
     show_password: bool,
     autostart: bool,
+    /// `Some(false)` : le pare-feu Windows risque de bloquer l'autre PC.
+    firewall_allowed: Option<bool>,
     outputs: Vec<String>,
     local_ip: Option<IpAddr>,
     error: Option<String>,
@@ -200,6 +202,7 @@ impl App {
             engine: None,
             show_password: false,
             autostart: autostart::is_enabled(),
+            firewall_allowed: firewall::is_allowed(),
             outputs: audio::output_names(),
             local_ip: local_ip(),
             error: None,
@@ -465,6 +468,26 @@ impl eframe::App for App {
                 ui.add_enabled_ui(!running, |ui| self.settings_ui(ui));
                 if running {
                     ui.label(egui::RichText::new("Arrêtez le partage pour modifier les réglages.").small().weak());
+                }
+
+                if self.firewall_allowed == Some(false) {
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.colored_label(
+                            egui::Color32::from_rgb(240, 160, 60),
+                            "Le pare-feu Windows peut empêcher l'autre PC de se connecter à celui-ci.",
+                        );
+                        if ui.button("Autoriser one-mouse dans le pare-feu").clicked() {
+                            match firewall::allow() {
+                                Ok(()) => {
+                                    self.firewall_allowed = Some(true);
+                                    self.error = None;
+                                }
+                                Err(e) => self.error = Some(format!("Pare-feu : {e:#}")),
+                            }
+                        }
+                    });
+                    ui.add_space(4.0);
                 }
 
                 let mut autostart = self.autostart;

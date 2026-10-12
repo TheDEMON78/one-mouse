@@ -33,8 +33,12 @@ opposé pour revenir. **Raccourci de secours** pour reprendre la main : `Ctrl` +
 (touche Windows / Cmd).
 
 Les réglages sont enregistrés. Les options « Démarrer le partage à l'ouverture de one-mouse » et « Lancer one-mouse à
-l'ouverture de session » rendent le partage automatique. Le port utilisé est `24850` (TCP) : autorisez-le dans le
-pare-feu du PC qui attend la connexion.
+l'ouverture de session » rendent le partage automatique.
+
+**Pare-feu** : le PC qui attend la connexion doit accepter le port TCP `24850`. Sous Windows, cliquez sur
+« Autoriser one-mouse dans le pare-feu » dans sa fenêtre (une confirmation Windows s'affiche). Sous Linux avec ufw :
+`sudo ufw allow 24850/tcp`. Si la connexion échoue avec « l'autre PC ne répond pas » (erreur 10060 sous Windows),
+c'est presque toujours le pare-feu du PC qui attend.
 
 ### En ligne de commande
 
