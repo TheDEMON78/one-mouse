@@ -1,6 +1,7 @@
 //! one-mouse : une seule souris et un seul clavier pour deux PC posés côte à côte.
 
 mod audio;
+mod capture;
 mod clipboard;
 mod crypto;
 mod protocol;
@@ -10,11 +11,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use input_capture::{InputCapture, Position};
+use input_capture::Position;
 use input_emulation::InputEmulation;
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::audio::AudioConfig;
+use crate::capture::Capture;
 use crate::clipboard::ClipboardSync;
 use crate::crypto::{Psk, Role};
 use crate::session::Local;
@@ -134,14 +136,7 @@ async fn run(cli: Cli) -> Result<()> {
     let psk = Psk::from_password(&password)?;
     let name = cli.name.unwrap_or_else(default_name);
 
-    let capture = match InputCapture::new(None).await {
-        Ok(capture) => Some(capture),
-        Err(e) => {
-            // Ex. Linux sous X11 : ce PC pourra être contrôlé, mais pas contrôler l'autre.
-            log::warn!("capture indisponible ({e}) : ce PC fonctionnera en réception seule");
-            None
-        }
-    };
+    let capture = Capture::new().await;
     let emulation = InputEmulation::new(None)
         .await
         .context("impossible de simuler la souris et le clavier")?;

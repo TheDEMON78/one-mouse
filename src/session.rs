@@ -11,14 +11,14 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use futures::StreamExt;
-use input_capture::{CaptureEvent, InputCapture, Position};
+use input_capture::{CaptureEvent, Position};
 use input_emulation::InputEmulation;
 use input_event::{Event, KeyboardEvent, scancode};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
-use crate::audio::{self, AudioConfig, AudioFrame, Capture, Player, Source};
+use crate::audio::{self, AudioCapture, AudioConfig, AudioFrame, AudioPlayer, Source};
+use crate::capture::Capture;
 use crate::clipboard::ClipboardSync;
 use crate::crypto::{self, Psk, Role};
 use crate::protocol::{self, AudioKind, MAX_CLIPBOARD_LEN, Message};
@@ -41,7 +41,7 @@ const RELEASE_KEYS: [scancode::Linux; 4] = [
 /// Ressources locales, conservées d'une connexion à l'autre.
 pub struct Local {
     /// `None` si ce PC ne peut que recevoir (ex. Linux sous X11).
-    pub capture: Option<InputCapture>,
+    pub capture: Option<Capture>,
     pub emulation: InputEmulation,
     pub clipboard: Option<ClipboardSync>,
     pub psk: Psk,
@@ -162,9 +162,7 @@ async fn event_loop(
     }
 }
 
-async fn next_capture(
-    capture: &mut Option<InputCapture>,
-) -> Option<Result<(u64, CaptureEvent), input_capture::CaptureError>> {
+async fn next_capture(capture: &mut Option<Capture>) -> Option<Result<(u64, CaptureEvent)>> {
     match capture {
         Some(c) => c.next().await,
         None => std::future::pending().await,
@@ -187,9 +185,9 @@ fn send_audio(out: &mpsc::Sender<Message>, kind: AudioKind, frame: &AudioFrame) 
 /// de ce que l'autre PC envoie.
 #[derive(Default)]
 struct AudioLink {
-    capture: Option<Capture>,
+    capture: Option<AudioCapture>,
     capture_failed: bool,
-    player: Option<Player>,
+    player: Option<AudioPlayer>,
     player_failed: bool,
 }
 
@@ -202,7 +200,7 @@ impl AudioLink {
         if self.capture.is_some() || self.capture_failed {
             return;
         }
-        match Capture::start(source, device) {
+        match AudioCapture::start(source, device) {
             Ok(capture) => self.capture = Some(capture),
             Err(e) => {
                 log::warn!("partage audio désactivé ({source:?}) : {e:#}");
@@ -219,7 +217,7 @@ impl AudioLink {
 
     fn play(&mut self, frame: &AudioFrame, output: Option<&str>) {
         if self.player.is_none() && !self.player_failed {
-            match Player::start(output) {
+            match AudioPlayer::start(output) {
                 Ok(player) => self.player = Some(player),
                 Err(e) => {
                     log::warn!("lecture du son reçu impossible : {e:#}");
@@ -269,7 +267,7 @@ async fn send(out: &mpsc::Sender<Message>, msg: Message) -> Result<()> {
 }
 
 async fn on_capture(
-    capture: &mut InputCapture,
+    capture: &mut Capture,
     state: &mut State,
     out: &mpsc::Sender<Message>,
     event: CaptureEvent,
@@ -370,7 +368,7 @@ async fn on_message(
 
 /// Rend la main localement : relâche les touches encore enfoncées chez l'autre PC.
 async fn stop_sending(
-    capture: &mut InputCapture,
+    capture: &mut Capture,
     state: &mut State,
     out: &mpsc::Sender<Message>,
 ) -> Result<()> {

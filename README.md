@@ -60,8 +60,8 @@ one-mouse --side left --password "mon mot de passe" connect 192.168.1.10
 
 - **macOS** : autoriser l'application dans *Réglages Système → Confidentialité et sécurité → Accessibilité*.
 - **Linux Wayland** (GNOME, KDE, Sway, Hyprland…) : le système demande l'autorisation au premier lancement.
-- **Linux X11** : le PC peut être *contrôlé*, mais pas encore *contrôler* l'autre (capture X11 non implémentée).
-  Pour revenir depuis un PC sous X11, utilisez le raccourci de secours.
+- **Linux X11** : aucune autorisation nécessaire. La capture X11 est propre à one-mouse (XInput2) : un PC sous X11
+  peut contrôler l'autre comme être contrôlé.
 
 ## Sécurité
 
@@ -81,7 +81,7 @@ pour les trois systèmes et les publie dans une release `v1.X.Y`.
 
 ```sh
 # Linux : dépendances de compilation
-sudo apt install libx11-dev libxtst-dev libxkbcommon-dev libasound2-dev
+sudo apt install libx11-dev libxtst-dev libxkbcommon-dev libxi-dev libasound2-dev
 
 cargo test
 cargo run -- --help
@@ -92,5 +92,6 @@ cargo build --release && cargo packager --release
 
 ## Licence
 
-GPL-3.0-or-later. La capture et l'émulation des entrées reposent sur les bibliothèques `input-capture` et
-`input-emulation` du projet [lan-mouse](https://github.com/feschber/lan-mouse).
+GPL-3.0-or-later. Sous Windows, macOS et Wayland, la capture et l'émulation des entrées reposent sur les
+bibliothèques `input-capture` et `input-emulation` du projet [lan-mouse](https://github.com/feschber/lan-mouse).
+La capture X11 (`src/capture/x11.rs`), le protocole chiffré, le son et le presse-papier sont propres à one-mouse.

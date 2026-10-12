@@ -192,12 +192,12 @@ fn system_loopback(host: &Host) -> Result<(Device, SupportedStreamConfig)> {
 }
 
 /// Capture audio en cours. S'arrête quand l'objet est détruit.
-pub struct Capture {
+pub struct AudioCapture {
     pub frames: mpsc::Receiver<AudioFrame>,
     _stop: std_mpsc::Sender<()>,
 }
 
-impl Capture {
+impl AudioCapture {
     pub fn start(source: Source, device: Option<&str>) -> Result<Self> {
         let device = device.map(str::to_owned);
         let (frames_tx, frames) = mpsc::channel(64);
@@ -359,13 +359,13 @@ impl PlayBuffer {
 }
 
 /// Lecture du son reçu de l'autre PC.
-pub struct Player {
+pub struct AudioPlayer {
     buffer: Arc<Mutex<PlayBuffer>>,
     converter: Converter,
     _stop: std_mpsc::Sender<()>,
 }
 
-impl Player {
+impl AudioPlayer {
     pub fn start(device: Option<&str>) -> Result<Self> {
         let device = device.map(str::to_owned);
         let (stop_tx, stop_rx) = std_mpsc::channel::<()>();

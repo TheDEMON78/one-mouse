@@ -29,7 +29,7 @@ languages = ["French", "English"]
 
 [package.metadata.packager.deb]
 section = "utils"
-depends = ["libx11-6", "libxtst6", "libasound2"]
+depends = ["libx11-6", "libxtst6", "libxi6", "libasound2"]
 
 [dependencies]
 anyhow = "1"
@@ -52,6 +52,8 @@ tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "time", "
 [target.'cfg(target_os = "linux")'.dependencies]
 cpal = { version = "0.18.2", features = ["pulseaudio"] }
 input-capture = "0.4.0"
+libc = "0.2"
+x11 = { version = "2.21", features = ["xlib", "xinput"] }
 input-emulation = "0.4.0"
 input-event = "0.4.0"
 

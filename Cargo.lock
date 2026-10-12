@@ -1572,12 +1572,14 @@ dependencies = [
  "input-capture",
  "input-emulation",
  "input-event",
+ "libc",
  "log",
  "postcard",
  "rand",
  "serde",
  "sha2",
  "tokio",
+ "x11",
 ]
 
 [[package]]
