@@ -23,11 +23,18 @@ use tokio::sync::mpsc;
 
 /// Durée d'un paquet audio envoyé sur le réseau.
 const FRAME_MS: u32 = 10;
-/// Tampon visé côté lecture : son accumulé avant de démarrer, et niveau que la
-/// compensation de dérive cherche à maintenir (absorbe les à-coups du Wi-Fi).
+/// Tampon de lecture visé au départ : son accumulé avant de démarrer, et niveau que
+/// la compensation de dérive cherche à maintenir. Il s'adapte au réseau : agrandi
+/// après chaque coupure (à-coups du Wi-Fi), réduit quand tout est stable.
 const TARGET_MS: u32 = 80;
-/// Au-delà de ce retard, le son en trop est jeté pour rester synchrone.
-const MAX_BUFFER_MS: u32 = 400;
+const MIN_TARGET_MS: u32 = 60;
+const MAX_TARGET_MS: u32 = 300;
+const TARGET_STEP_UP_MS: u32 = 40;
+const TARGET_STEP_DOWN_MS: u32 = 20;
+/// Durée sans coupure avant de réduire le tampon.
+const STABLE_BEFORE_SHRINK: std::time::Duration = std::time::Duration::from_secs(30);
+/// Marge au-delà de la cible avant de jeter le son en trop (rester synchrone).
+const MAX_EXTRA_MS: u32 = 300;
 /// Tampon demandé à la carte son (capture et lecture).
 const DEVICE_BUFFER_MS: u32 = 20;
 /// Correction maximale de la vitesse de lecture (0,2 % : imperceptible). Suffit
@@ -352,15 +359,21 @@ fn low_latency(config: &SupportedStreamConfig) -> StreamConfig {
     stream_config
 }
 
-/// Essaie d'abord un petit tampon, puis la configuration par défaut du système.
+/// Sous Linux, essaie d'abord un petit tampon (PulseAudio en prend sinon plusieurs
+/// secondes), puis la configuration par défaut. Ailleurs (WASAPI, CoreAudio), le
+/// réglage par défaut est déjà court : en imposer un plus petit provoque des
+/// craquements.
 fn with_fallback(
     config: &SupportedStreamConfig,
     mut build: impl FnMut(StreamConfig) -> Result<cpal::Stream>,
 ) -> Result<cpal::Stream> {
-    build(low_latency(config)).or_else(|e| {
-        log::debug!("tampon audio court refusé ({e:#}), configuration par défaut");
-        build(config.config())
-    })
+    if cfg!(target_os = "linux") {
+        if let Ok(stream) = build(low_latency(config)) {
+            return Ok(stream);
+        }
+        log::debug!("tampon audio court refusé, configuration par défaut");
+    }
+    build(config.config())
 }
 
 fn build_input(
@@ -429,9 +442,12 @@ where
 struct PlayBuffer {
     samples: VecDeque<f32>,
     primed: bool,
+    /// Niveau visé (échantillons) : accumulé avant de (re)démarrer la lecture.
     prime_len: usize,
     max_len: usize,
     channels: usize,
+    /// Nombre de fois où le tampon s'est vidé (coupure audible).
+    underruns: u64,
 }
 
 impl PlayBuffer {
@@ -456,6 +472,7 @@ impl PlayBuffer {
             Some(s) => s,
             None => {
                 self.primed = false;
+                self.underruns += 1;
                 0.0
             }
         }
@@ -468,6 +485,14 @@ pub struct AudioPlayer {
     converter: Converter,
     /// Remplissage du tampon lissé, en proportion de la cible (1.0 = à la cible).
     fill: f64,
+    /// Échantillons par milliseconde de la sortie.
+    per_ms: usize,
+    /// Tampon visé actuellement (adaptatif).
+    target_ms: u32,
+    /// Coupures déjà prises en compte.
+    seen_underruns: u64,
+    /// Dernier changement de taille du tampon.
+    last_change: std::time::Instant,
     _stop: std_mpsc::Sender<()>,
 }
 
@@ -497,8 +522,9 @@ impl AudioPlayer {
                         samples: VecDeque::new(),
                         primed: false,
                         prime_len: per_ms * TARGET_MS as usize,
-                        max_len: per_ms * MAX_BUFFER_MS as usize,
+                        max_len: per_ms * (TARGET_MS + MAX_EXTRA_MS) as usize,
                         channels: channels as usize,
+                        underruns: 0,
                     }));
                     let stream = build_output(&device, &config, buffer.clone())?;
                     stream.play()?;
@@ -523,14 +549,20 @@ impl AudioPlayer {
             buffer,
             converter: Converter::new(rate, channels),
             fill: 1.0,
+            per_ms: rate as usize * channels as usize / 1000,
+            target_ms: TARGET_MS,
+            seen_underruns: 0,
+            last_change: std::time::Instant::now(),
             _stop: stop_tx,
         })
     }
 
     pub fn push(&mut self, frame: &AudioFrame) {
-        let Ok(mut buffer) = self.buffer.lock() else {
+        let shared = self.buffer.clone();
+        let Ok(mut buffer) = shared.lock() else {
             return;
         };
+        self.adapt_target(&mut buffer);
         // Compensation de dérive : tampon trop rempli → lecture un peu plus rapide,
         // trop vide → un peu plus lente. Lissé pour ne pas moduler la hauteur du son.
         if buffer.primed {
@@ -548,6 +580,33 @@ impl AudioPlayer {
         let speed = drift_speed(self.fill);
         let converted = self.converter.convert(frame, speed);
         buffer.push(&converted);
+    }
+}
+
+impl AudioPlayer {
+    /// Tampon adaptatif : plus grand après une coupure, plus petit après 30 s sans.
+    fn adapt_target(&mut self, buffer: &mut PlayBuffer) {
+        let target = if buffer.underruns > self.seen_underruns {
+            let missed = buffer.underruns - self.seen_underruns;
+            self.seen_underruns = buffer.underruns;
+            let target = (self.target_ms + TARGET_STEP_UP_MS).min(MAX_TARGET_MS);
+            log::info!(
+                "son : {missed} coupure(s), tampon porté à {target} ms (réseau irrégulier ?)"
+            );
+            target
+        } else if self.last_change.elapsed() > STABLE_BEFORE_SHRINK
+            && self.target_ms > MIN_TARGET_MS
+        {
+            (self.target_ms - TARGET_STEP_DOWN_MS).max(MIN_TARGET_MS)
+        } else {
+            return;
+        };
+        self.last_change = std::time::Instant::now();
+        if target != self.target_ms {
+            self.target_ms = target;
+            buffer.prime_len = self.per_ms * target as usize;
+            buffer.max_len = self.per_ms * (target + MAX_EXTRA_MS) as usize;
+        }
     }
 }
 
@@ -820,6 +879,7 @@ mod tests {
             prime_len: 4,
             max_len: 8,
             channels: 2,
+            underruns: 0,
         };
         buf.push(&[1.0, 1.0]);
         assert_eq!(buf.pop(), 0.0, "attend d'avoir assez de son");
