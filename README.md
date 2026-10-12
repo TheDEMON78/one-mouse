@@ -60,8 +60,8 @@ de lire les frappes clavier, ni d'envoyer de faux événements.
 La version est calculée à partir du nombre de commits : `1.X.Y` avec `X = commits / 100` et `Y = commits % 100`.
 Par exemple, 1 commit donne `1.0.1`, 48 commits `1.0.48` et 101 commits `1.1.1`. Voir `scripts/version.sh`.
 
-À chaque push, la GitHub Action [Installateurs](.github/workflows/release.yml) compile les installateurs pour les
-trois systèmes (disponibles dans les artefacts du workflow). Sur `main`, elle publie en plus une release `v1.X.Y`.
+À chaque push sur `main`, la GitHub Action [Installateurs](.github/workflows/release.yml) compile les installateurs
+pour les trois systèmes et les publie dans une release `v1.X.Y`.
 
 ## Développement
 

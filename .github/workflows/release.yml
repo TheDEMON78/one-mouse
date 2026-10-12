@@ -1,10 +1,10 @@
 name: Installateurs
 
-# À chaque push : installateurs Windows, macOS et Linux disponibles dans les
-# artefacts du workflow. Sur main : publiés en plus dans une release v1.X.Y.
+# À chaque push sur main : installateurs Windows, macOS et Linux publiés dans
+# une release GitHub v1.X.Y (X.Y calculés depuis le nombre de commits).
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -88,7 +88,6 @@ jobs:
 
   release:
     needs: [version, build]
-    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
