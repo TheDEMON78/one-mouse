@@ -29,7 +29,7 @@ languages = ["French", "English"]
 
 [package.metadata.packager.deb]
 section = "utils"
-depends = ["libx11-6", "libxtst6"]
+depends = ["libx11-6", "libxtst6", "libasound2"]
 
 [dependencies]
 anyhow = "1"
@@ -50,11 +50,13 @@ tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "time", "
 # Les backends Wayland / X11 ne sont activés que pour Linux : le build.rs de ces
 # crates détecte l'OS de la machine qui compile, pas celui de la cible.
 [target.'cfg(target_os = "linux")'.dependencies]
+cpal = { version = "0.18.2", features = ["pulseaudio"] }
 input-capture = "0.4.0"
 input-emulation = "0.4.0"
 input-event = "0.4.0"
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
+cpal = "0.18.2"
 input-capture = { version = "0.4.0", default-features = false }
 input-emulation = { version = "0.4.0", default-features = false }
 input-event = { version = "0.4.0", default-features = false }

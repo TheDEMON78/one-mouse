@@ -3,6 +3,8 @@
 use input_event::{Event, KeyboardEvent, PointerEvent};
 use serde::{Deserialize, Serialize};
 
+use crate::audio::AudioFrame;
+
 /// Version du protocole, incrémentée à chaque changement incompatible.
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -23,8 +25,50 @@ pub enum Message {
     Leave,
     /// Nouveau texte copié dans le presse-papier.
     Clipboard(String),
+    /// Paquet de son (PCM 16 bits little-endian entrelacé).
+    Audio {
+        kind: AudioKind,
+        rate: u32,
+        channels: u16,
+        pcm: Vec<u8>,
+    },
     /// Maintien de la connexion.
     Ping,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AudioKind {
+    /// Son du système (ce qui sort des haut-parleurs).
+    Sound,
+    /// Micro.
+    Mic,
+}
+
+impl Message {
+    pub fn audio(kind: AudioKind, frame: &AudioFrame) -> Self {
+        Message::Audio {
+            kind,
+            rate: frame.rate,
+            channels: frame.channels,
+            pcm: frame.samples.iter().flat_map(|s| s.to_le_bytes()).collect(),
+        }
+    }
+}
+
+/// Reconstitue un paquet de son reçu ; `None` s'il est invalide.
+pub fn audio_frame(rate: u32, channels: u16, pcm: &[u8]) -> Option<AudioFrame> {
+    if !pcm.len().is_multiple_of(2) {
+        return None;
+    }
+    let frame = AudioFrame {
+        rate,
+        channels,
+        samples: pcm
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .collect(),
+    };
+    frame.is_valid().then_some(frame)
 }
 
 /// Équivalent sérialisable de [`input_event::Event`].
@@ -173,5 +217,27 @@ mod tests {
             };
             assert_eq!(Event::from(wire), event);
         }
+    }
+
+    #[test]
+    fn audio_roundtrip() {
+        let frame = AudioFrame {
+            rate: 48_000,
+            channels: 2,
+            samples: vec![0, -1, i16::MAX, i16::MIN],
+        };
+        let Message::Audio {
+            kind,
+            rate,
+            channels,
+            pcm,
+        } = Message::audio(AudioKind::Mic, &frame)
+        else {
+            panic!("mauvais message")
+        };
+        assert_eq!(kind, AudioKind::Mic);
+        assert_eq!(audio_frame(rate, channels, &pcm), Some(frame));
+        assert_eq!(audio_frame(48_000, 2, &[0, 0, 0]), None);
+        assert_eq!(audio_frame(48_000, 0, &[]), None);
     }
 }

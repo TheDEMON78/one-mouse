@@ -1,5 +1,6 @@
 //! one-mouse : une seule souris et un seul clavier pour deux PC posés côte à côte.
 
+mod audio;
 mod clipboard;
 mod crypto;
 mod protocol;
@@ -13,6 +14,7 @@ use input_capture::{InputCapture, Position};
 use input_emulation::InputEmulation;
 use tokio::net::{TcpListener, TcpStream};
 
+use crate::audio::AudioConfig;
 use crate::clipboard::ClipboardSync;
 use crate::crypto::{Psk, Role};
 use crate::session::Local;
@@ -49,6 +51,31 @@ struct Cli {
     /// Désactive le partage du presse-papier.
     #[arg(long, global = true)]
     no_clipboard: bool,
+
+    /// Envoi du son de ce PC à l'autre (auto : quand l'autre PC contrôle celui-ci).
+    #[arg(long, value_enum, global = true, default_value = "auto")]
+    sound: audio::Mode,
+
+    /// Envoi du micro de ce PC à l'autre (auto : quand ce PC contrôle l'autre).
+    #[arg(long, value_enum, global = true, default_value = "off")]
+    mic: audio::Mode,
+
+    /// Source du son à envoyer (par défaut : la sortie audio principale).
+    #[arg(long, global = true, value_name = "PÉRIPHÉRIQUE")]
+    sound_device: Option<String>,
+
+    /// Micro à envoyer (par défaut : le micro principal).
+    #[arg(long, global = true, value_name = "PÉRIPHÉRIQUE")]
+    mic_device: Option<String>,
+
+    /// Sortie où jouer le son reçu de l'autre PC (par défaut : la sortie principale).
+    #[arg(long, global = true, value_name = "PÉRIPHÉRIQUE")]
+    sound_output: Option<String>,
+
+    /// Sortie où jouer le micro reçu de l'autre PC, par exemple un câble audio virtuel
+    /// (« CABLE Input », « BlackHole »…) pour l'utiliser comme micro dans les applications.
+    #[arg(long, global = true, value_name = "PÉRIPHÉRIQUE")]
+    mic_output: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -64,6 +91,8 @@ enum Mode {
         /// Adresse de l'autre PC, par exemple 192.168.1.20 ou 192.168.1.20:24850.
         host: String,
     },
+    /// Liste les périphériques audio (pour --sound-device, --mic-output…).
+    AudioDevices,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -96,6 +125,9 @@ fn main() -> Result<()> {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    if let Mode::AudioDevices = cli.mode {
+        return audio::list_devices();
+    }
     let password = cli
         .password
         .context("mot de passe manquant : utilisez --password ou ONE_MOUSE_PASSWORD")?;
@@ -122,6 +154,14 @@ async fn run(cli: Cli) -> Result<()> {
         psk,
         name,
         peer_side: cli.side.into(),
+        audio: AudioConfig {
+            sound: cli.sound,
+            mic: cli.mic,
+            sound_device: cli.sound_device,
+            mic_device: cli.mic_device,
+            sound_output: cli.sound_output,
+            mic_output: cli.mic_output,
+        },
     };
 
     let result = tokio::select! {
@@ -141,6 +181,8 @@ async fn run(cli: Cli) -> Result<()> {
 
 async fn serve(mode: &Mode, local: &mut Local) -> Result<()> {
     match mode {
+        // Traité au démarrage, avant d'initialiser la capture.
+        Mode::AudioDevices => Ok(()),
         Mode::Listen { bind } => {
             let listener = TcpListener::bind(bind)
                 .await

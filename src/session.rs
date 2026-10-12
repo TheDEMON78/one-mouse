@@ -4,6 +4,9 @@
 //! l'écran du côté de l'autre PC devient « émetteur » : ses entrées locales sont
 //! capturées et envoyées, l'autre PC les rejoue. Quand le curseur rejoué atteint
 //! le bord du retour, le récepteur envoie `Leave` et l'émetteur rend la main.
+//!
+//! Son : par défaut, le PC contrôlé envoie son son au PC qui le contrôle, et le
+//! micro du PC qui contrôle peut être envoyé au PC contrôlé (voir `audio::Mode`).
 
 use std::time::Duration;
 
@@ -15,9 +18,10 @@ use input_event::{Event, KeyboardEvent, scancode};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
+use crate::audio::{self, AudioConfig, AudioFrame, Capture, Player, Source};
 use crate::clipboard::ClipboardSync;
 use crate::crypto::{self, Psk, Role};
-use crate::protocol::{MAX_CLIPBOARD_LEN, Message};
+use crate::protocol::{self, AudioKind, MAX_CLIPBOARD_LEN, Message};
 
 /// Identifiant de l'unique autre PC (la V1 gère une seule connexion).
 const PEER: u64 = 0;
@@ -44,6 +48,7 @@ pub struct Local {
     pub name: String,
     /// Position de l'autre PC par rapport à celui-ci.
     pub peer_side: Position,
+    pub audio: AudioConfig,
 }
 
 #[derive(Default)]
@@ -123,9 +128,11 @@ async fn event_loop(
     incoming: &mut mpsc::Receiver<Message>,
 ) -> Result<()> {
     let mut state = State::default();
+    let mut audio = AudioState::default();
     let mut ping = tokio::time::interval(PING_INTERVAL);
 
     loop {
+        audio.sync(&local.audio, &state);
         tokio::select! {
             event = next_capture(&mut local.capture) => {
                 let Some(event) = event else { bail!("la capture des entrées s'est arrêtée") };
@@ -136,8 +143,16 @@ async fn event_loop(
             msg = incoming.recv() => {
                 // `None` : la tâche de lecture s'est arrêtée (déconnexion).
                 let Some(msg) = msg else { return Ok(()) };
-                on_message(local, &mut state, out, msg).await?;
+                on_message(local, &mut state, &mut audio, out, msg).await?;
             }
+            frame = recv_frame(&mut audio.sound) => match frame {
+                Some(frame) => send_audio(out, AudioKind::Sound, &frame),
+                None => audio.sound.capture_stopped(),
+            },
+            frame = recv_frame(&mut audio.mic) => match frame {
+                Some(frame) => send_audio(out, AudioKind::Mic, &frame),
+                None => audio.mic.capture_stopped(),
+            },
             Some(text) = recv_clipboard(&mut local.clipboard) => {
                 log::debug!("presse-papier local modifié ({} octets), envoi", text.len());
                 send(out, Message::Clipboard(text)).await?;
@@ -153,6 +168,90 @@ async fn next_capture(
     match capture {
         Some(c) => c.next().await,
         None => std::future::pending().await,
+    }
+}
+
+async fn recv_frame(link: &mut AudioLink) -> Option<AudioFrame> {
+    match &mut link.capture {
+        Some(c) => c.frames.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Le son passe après les entrées : si la connexion sature, le paquet est perdu.
+fn send_audio(out: &mpsc::Sender<Message>, kind: AudioKind, frame: &AudioFrame) {
+    let _ = out.try_send(Message::audio(kind, frame));
+}
+
+/// Un sens de partage audio (son du système ou micro) : capture locale et lecture
+/// de ce que l'autre PC envoie.
+#[derive(Default)]
+struct AudioLink {
+    capture: Option<Capture>,
+    capture_failed: bool,
+    player: Option<Player>,
+    player_failed: bool,
+}
+
+impl AudioLink {
+    fn sync_capture(&mut self, wanted: bool, source: Source, device: Option<&str>) {
+        if !wanted {
+            self.capture = None;
+            return;
+        }
+        if self.capture.is_some() || self.capture_failed {
+            return;
+        }
+        match Capture::start(source, device) {
+            Ok(capture) => self.capture = Some(capture),
+            Err(e) => {
+                log::warn!("partage audio désactivé ({source:?}) : {e:#}");
+                self.capture_failed = true;
+            }
+        }
+    }
+
+    fn capture_stopped(&mut self) {
+        log::warn!("la capture audio s'est arrêtée");
+        self.capture = None;
+        self.capture_failed = true;
+    }
+
+    fn play(&mut self, frame: &AudioFrame, output: Option<&str>) {
+        if self.player.is_none() && !self.player_failed {
+            match Player::start(output) {
+                Ok(player) => self.player = Some(player),
+                Err(e) => {
+                    log::warn!("lecture du son reçu impossible : {e:#}");
+                    self.player_failed = true;
+                }
+            }
+        }
+        if let Some(player) = &mut self.player {
+            player.push(frame);
+        }
+    }
+}
+
+#[derive(Default)]
+struct AudioState {
+    sound: AudioLink,
+    mic: AudioLink,
+}
+
+impl AudioState {
+    /// Démarre ou arrête les captures selon qui contrôle qui.
+    fn sync(&mut self, config: &AudioConfig, state: &State) {
+        self.sound.sync_capture(
+            config.sound.wanted(state.receiving),
+            Source::System,
+            config.sound_device.as_deref(),
+        );
+        self.mic.sync_capture(
+            config.mic.wanted(state.sending),
+            Source::Microphone,
+            config.mic_device.as_deref(),
+        );
     }
 }
 
@@ -203,6 +302,7 @@ async fn on_capture(
 async fn on_message(
     local: &mut Local,
     state: &mut State,
+    audio: &mut AudioState,
     out: &mpsc::Sender<Message>,
     msg: Message,
 ) -> Result<()> {
@@ -232,6 +332,34 @@ async fn on_message(
                 && text.len() <= MAX_CLIPBOARD_LEN
             {
                 clipboard.set(text);
+            }
+        }
+        Message::Audio {
+            kind,
+            rate,
+            channels,
+            pcm,
+        } => {
+            let Some(frame) = protocol::audio_frame(rate, channels, &pcm) else {
+                return Ok(());
+            };
+            match kind {
+                AudioKind::Sound => audio
+                    .sound
+                    .play(&frame, local.audio.sound_output.as_deref()),
+                AudioKind::Mic => {
+                    if audio.mic.player.is_none()
+                        && !audio.mic.player_failed
+                        && local.audio.mic_output.is_none()
+                        && local.audio.sound != audio::Mode::Off
+                    {
+                        log::warn!(
+                            "le micro de l'autre PC est joué sur les haut-parleurs et risque de lui être renvoyé \
+                             avec le son : utilisez --mic-output vers un câble audio virtuel"
+                        );
+                    }
+                    audio.mic.play(&frame, local.audio.mic_output.as_deref());
+                }
             }
         }
         Message::Ping => {}
