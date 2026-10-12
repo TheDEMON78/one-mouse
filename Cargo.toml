@@ -1,0 +1,40 @@
+[package]
+name = "one-mouse"
+version = "0.1.0"
+edition = "2024"
+description = "Une seule souris et un seul clavier pour deux PC (Windows, Linux, macOS)"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/TheDEMON78/one-mouse-for-two-pc"
+
+[dependencies]
+anyhow = "1"
+arboard = "3"
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+clap = { version = "4", features = ["derive", "env"] }
+env_logger = "0.11"
+futures = "0.3"
+hkdf = "0.12"
+log = "0.4"
+postcard = { version = "1", features = ["use-std"] }
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "time", "sync", "signal"] }
+
+# Les backends Wayland / X11 ne sont activés que pour Linux : le build.rs de ces
+# crates détecte l'OS de la machine qui compile, pas celui de la cible.
+[target.'cfg(target_os = "linux")'.dependencies]
+input-capture = "0.4.0"
+input-emulation = "0.4.0"
+input-event = "0.4.0"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+input-capture = { version = "0.4.0", default-features = false }
+input-emulation = { version = "0.4.0", default-features = false }
+input-event = { version = "0.4.0", default-features = false }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
