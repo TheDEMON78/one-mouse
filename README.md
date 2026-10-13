@@ -22,7 +22,7 @@ suit, le presse-papier est partagé, et le son de l'autre PC arrive dans votre c
 Ce n'est **pas** du bureau à distance : aucune image n'est transmise, chaque PC garde son propre écran.
 
 <p align="center">
-  <img src="docs/interface.png" alt="Fenêtre de one-mouse : onglets Connexion et Écrans" width="760">
+  <img src="docs/interface.png" alt="Fenêtre de one-mouse : onglets Accueil et Écrans" width="760">
 </p>
 
 ## Fonctionnalités
@@ -67,7 +67,7 @@ installez **la même version sur les deux PC** :
 
 ## Mises à jour
 
-one-mouse vérifie les nouvelles versions au démarrage puis toutes les 6 heures (onglet Options → Mises à jour).
+one-mouse vérifie les nouvelles versions au démarrage puis toutes les 6 heures (onglet Réglages → Mises à jour).
 
 - **Windows** et **Linux (AppImage)** : la nouvelle version est téléchargée, son empreinte SHA-256 vérifiée, puis elle
   est installée dès que la souris ne contrôle aucun PC ; one-mouse redémarre seul (et relance le partage si l'option
@@ -83,7 +83,7 @@ Ouvrez **one-mouse** sur les deux PC (même réseau local) :
    local, le PC qui attend avec le même mot de passe (l'adresse reste possible, par exemple à travers un VPN).
 3. Sur les deux PC : saisissez le **même mot de passe** (8 caractères minimum), indiquez dans l'onglet Écrans de quel
    côté se trouve l'autre PC, puis cliquez sur **Démarrer le partage**.
-4. Sur le PC où sont branchés la souris, le clavier et le casque, cochez « Ce PC est mon PC principal » (onglet Son).
+4. Sur le PC où sont branchés la souris, le clavier et le casque, cochez « Ma souris, mon clavier et mon casque sont branchés sur ce PC » (onglet Son et micro).
 
 Poussez ensuite le curseur contre le bord de l'écran situé du côté de l'autre PC pour passer dessus, et contre le bord
 opposé pour revenir.
@@ -97,7 +97,7 @@ notification ; fermer la fenêtre l'y garde (clic sur l'icône pour la rouvrir, 
 ## Liaison par Bluetooth
 
 Sans réseau commun, les deux PC peuvent se relier **directement en Bluetooth**, sans adresse à saisir (Windows et
-Linux). Choisissez **Bluetooth** dans « Liaison entre les deux PC » (onglet Connexion) sur les deux PC.
+Linux). Choisissez **Par Bluetooth** dans « Comment les deux PC communiquent » (onglet Accueil) sur les deux PC.
 
 1. **Une seule fois** : démarrez le partage sur le PC qui attend (il devient visible en Bluetooth), puis sur l'autre
    PC cliquez sur **Associer en Bluetooth**, choisissez le premier PC et confirmez le code affiché sur les deux.
@@ -105,8 +105,8 @@ Linux). Choisissez **Bluetooth** dans « Liaison entre les deux PC » (onglet Co
 2. **Ensuite** : démarrez simplement le partage sur les deux PC. Celui qui se connecte cherche tout seul, parmi les PC
    associés, celui qui attend avec one-mouse, et se reconnecte automatiquement.
 
-**Savoir par où ça passe** : pendant le partage, l'onglet Connexion indique la liaison (« Bluetooth », « réseau local —
-son sans perte en UDP » ou « … par TCP »). En mode Bluetooth, avant la connexion, il affiche aussi l'étape en cours
+**Savoir par où ça passe** : pendant le partage, l'onglet Accueil indique la liaison (« Relié en Bluetooth », « Relié par le
+réseau — son en qualité parfaite » ou « … son en mode de secours »). En mode Bluetooth, avant la connexion, il affiche aussi l'étape en cours
 (ce PC visible et en attente, recherche parmi les PC associés) ou l'erreur exacte, par exemple « one-mouse n'y attend
 pas en Bluetooth » ou « ne répond pas (éteint, trop loin ou Bluetooth coupé) » pour chaque PC associé essayé.
 
@@ -130,9 +130,9 @@ adresse.
   pendant la connexion. L'ancien micro est rétabli à l'arrêt.
   - Linux : one-mouse crée lui-même le micro virtuel « Micro-one-mouse ».
   - Windows et macOS : il faut un pilote gratuit, [VB-Cable](https://vb-audio.com/Cable/) ou
-    [BlackHole](https://existential.audio/blackhole/) (bouton « Installer le micro virtuel » dans l'onglet Son).
+    [BlackHole](https://existential.audio/blackhole/) (bouton « Installer … (gratuit) » dans l'onglet Son et micro).
   - Sans micro virtuel, le micro reçu n'est pas joué sur les haut-parleurs (il reviendrait en écho).
-  - L'onglet Connexion indique en direct le micro envoyé, et sur l'autre PC si le micro reçu est bien devenu le
+  - L'onglet Accueil indique en direct le micro envoyé, et sur l'autre PC si le micro reçu est bien devenu le
     micro par défaut (sinon : quoi installer ou choisir).
   - Le PC principal n'envoie jamais un micro virtuel resté par défaut : il prend alors son vrai micro.
   - **Jamais d'écho de votre voix** : si un câble virtuel est devenu la sortie son par défaut (VB-Cable le fait souvent
@@ -160,7 +160,7 @@ Le Wake-on-LAN demande un réglage **sur le PC à réveiller** :
 
 1. Connectez une fois les deux PC par le réseau : chacun mémorise les adresses
    des cartes réseau de l'autre.
-2. Sur le PC à réveiller, **Options → « Préparer ce PC à être réveillé »**
+2. Sur le PC à réveiller, **Réglages → « Préparer ce PC pour être allumé à distance »**
    (droits d'administrateur) :
    - Windows : réveil par paquet magique activé sur les cartes réseau (et
      autorisé dans le gestionnaire de périphériques), démarrage rapide
@@ -179,7 +179,7 @@ réseau local.
 Le PC qui attend la connexion doit accepter le port TCP `24850` (et l'UDP pour le son, sinon il passe en TCP). La
 découverte automatique utilise le port UDP `24851` sur le PC qui se connecte : sans lui, saisissez l'adresse.
 
-- **Windows** : cliquez sur « Autoriser one-mouse dans le pare-feu », dans l'onglet Options (une confirmation
+- **Windows** : cliquez sur « Autoriser one-mouse dans le pare-feu », dans l'onglet Réglages (une confirmation
   Windows s'affiche).
 - **Linux avec ufw** : `sudo ufw allow 24850/tcp`.
 

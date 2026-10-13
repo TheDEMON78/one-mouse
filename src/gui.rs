@@ -39,8 +39,8 @@ pub fn run(hidden: bool) -> Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_title("one-mouse")
             .with_icon(icon)
-            .with_inner_size([520.0, 680.0])
-            .with_min_inner_size([400.0, 480.0])
+            .with_inner_size([600.0, 720.0])
+            .with_min_inner_size([460.0, 520.0])
             .with_drag_and_drop(true),
         ..Default::default()
     };
@@ -68,6 +68,8 @@ struct Shared {
     screens: Option<ScreensStatus>,
     /// Fichiers glissés contre le bord : zone de dépôt à afficher.
     drag_edge: Option<(DragEdge, Instant)>,
+    /// Problème courant repéré dans le journal (mot de passe différent…).
+    hint: Option<String>,
     log: VecDeque<String>,
 }
 
@@ -125,6 +127,9 @@ impl Engine {
                             shared.mic = None;
                             shared.link = None;
                         }
+                        if matches!(status, Status::Connected(_)) {
+                            shared.hint = None;
+                        }
                         shared.status = Some(status);
                     } else if let Some(mic) = MicStatus::parse(&line) {
                         shared.mic = Some(mic);
@@ -158,7 +163,12 @@ impl Engine {
         }
         std::thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                shared.lock().expect("verrou").push_log(simplify_log(&line));
+                let mut shared = shared.lock().expect("verrou");
+                if let Some(hint) = hint_for(&line) {
+                    shared.hint = Some(hint);
+                }
+                shared.push_log(simplify_log(&line));
+                drop(shared);
                 ctx.request_repaint();
             }
         });
@@ -232,6 +242,46 @@ fn simplify_log(line: &str) -> String {
         ""
     };
     format!("{time} {level}{message}")
+}
+
+/// Explication claire d'un problème du moteur, avec ce qu'il faut faire.
+fn friendly_error(message: &str) -> String {
+    hint_for(message).unwrap_or_else(|| {
+        let mut text: String = message.to_owned();
+        if let Some(first) = text.get(..1) {
+            text.replace_range(..1, &first.to_uppercase());
+        }
+        if !text.ends_with('.') {
+            text.push('.');
+        }
+        text
+    })
+}
+
+/// Problème courant reconnu dans un message du moteur, expliqué simplement.
+fn hint_for(message: &str) -> Option<String> {
+    let m = message.to_lowercase();
+    let text = if m.contains("mots de passe sont-ils identiques") {
+        "Le mot de passe n'est pas le même sur les deux PC : saisissez exactement le même \
+         des deux côtés."
+    } else if m.contains("mettez one-mouse à jour") || m.contains("version incompatible") {
+        "Les deux PC n'ont pas la même version de one-mouse : mettez-les à jour (onglet \
+         Réglages, « Mises à jour »)."
+    } else if m.contains("impossible d'écouter") {
+        "one-mouse semble déjà ouvert sur ce PC (peut-être réduit près de l'horloge). \
+         Fermez l'autre fenêtre puis réessayez."
+    } else if m.contains("simuler la souris") {
+        "one-mouse n'a pas l'autorisation de piloter la souris de ce PC. Sur Mac : Réglages \
+         Système, Confidentialité et sécurité, Accessibilité, puis cochez one-mouse."
+    } else if m.contains("bluetooth") && (m.contains("indisponible") || m.contains("activé")) {
+        "Le Bluetooth semble désactivé sur ce PC : activez-le puis réessayez."
+    } else if m.contains("n'est pas one-mouse") {
+        "Un autre logiciel a répondu à la place de one-mouse : vérifiez l'adresse saisie, ou \
+         laissez-la vide."
+    } else {
+        return None;
+    };
+    Some(text.to_owned())
 }
 
 /// Adresse IP de ce PC sur le réseau local (aucun paquet n'est envoyé).
@@ -372,6 +422,7 @@ impl App {
         {
             let mut shared = self.shared.lock().expect("verrou");
             shared.status = None;
+            shared.hint = None;
             shared.mic = None;
             shared.link = None;
             shared.bt = None;
@@ -405,43 +456,57 @@ impl App {
     fn status_view(&mut self, running: bool) -> (egui::Color32, String, String) {
         let status = self.shared.lock().expect("verrou").status.clone();
         match (running, status) {
-            (_, Some(Status::Error(msg))) => (RED, "Erreur".into(), msg),
+            (_, Some(Status::Error(msg))) => (RED, "Problème".into(), friendly_error(&msg)),
             (false, _) => (
                 GREY,
-                "Arrêté".into(),
-                "Réglez la connexion puis démarrez le partage.".into(),
+                "Partage arrêté".into(),
+                "Cliquez sur « Démarrer le partage », en bas de la fenêtre, sur les deux PC."
+                    .into(),
             ),
-            (true, None) => (ORANGE, "Démarrage".into(), "Lancement du partage…".into()),
+            (true, None) => (ORANGE, "Démarrage…".into(), "Lancement du partage.".into()),
             (true, Some(Status::Listening)) => (
                 ORANGE,
-                "En attente".into(),
-                "Démarrez le partage sur l'autre PC avec l'adresse ci-dessous.".into(),
+                "En attente de l'autre PC".into(),
+                "Démarrez maintenant le partage sur l'autre PC, avec le même mot de passe : \
+                 les deux PC se trouveront tout seuls."
+                    .into(),
             ),
             (true, Some(Status::Connecting)) => (
                 ORANGE,
-                "Connexion".into(),
+                "Recherche de l'autre PC".into(),
                 if self.settings.bluetooth {
-                    "Recherche de l'autre PC en Bluetooth…".into()
+                    "Recherche en Bluetooth… Vérifiez que le partage est démarré sur l'autre PC."
+                        .into()
                 } else if self.settings.address.trim().is_empty() {
-                    "Recherche de l'autre PC sur le réseau…".into()
+                    "Recherche sur votre réseau… Vérifiez que le partage est démarré sur l'autre \
+                     PC et que les deux PC sont sur la même box ou le même Wi-Fi."
+                        .into()
                 } else {
-                    format!("Recherche de {}…", self.settings.address.trim())
+                    format!(
+                        "Recherche de {}… Vérifiez que le partage est démarré sur l'autre PC.",
+                        self.settings.address.trim()
+                    )
                 },
             ),
             (true, Some(Status::Connected(name))) => (
                 GREEN,
                 "Connecté".into(),
-                format!("Relié à « {name} ». Poussez la souris vers l'autre écran."),
+                format!(
+                    "Relié à « {name} ». Poussez la souris vers le bord de l'écran, du côté \
+                     de l'autre PC, pour passer dessus."
+                ),
             ),
             (true, Some(Status::Sending)) => (
                 ACCENT,
-                "Sur l'autre PC".into(),
-                "Votre souris et votre clavier contrôlent l'autre PC.".into(),
+                "Vous utilisez l'autre PC".into(),
+                "Votre souris et votre clavier pilotent l'autre PC. Revenez en ramenant la \
+                 souris vers ce PC."
+                    .into(),
             ),
             (true, Some(Status::Receiving)) => (
                 ACCENT,
-                "Contrôlé".into(),
-                "L'autre PC contrôle celui-ci.".into(),
+                "Piloté par l'autre PC".into(),
+                "La souris et le clavier de l'autre PC pilotent celui-ci.".into(),
             ),
         }
     }
@@ -458,12 +523,9 @@ impl App {
                         .color(TEXT),
                 );
                 ui.label(
-                    egui::RichText::new(format!(
-                        "BloopStudio · version {}",
-                        env!("CARGO_PKG_VERSION")
-                    ))
-                    .size(12.0)
-                    .color(MUTED),
+                    egui::RichText::new("Une souris et un clavier pour deux ordinateurs")
+                        .size(12.0)
+                        .color(MUTED),
                 );
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -473,32 +535,46 @@ impl App {
     }
 
     fn tabs(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        // Onglets de même largeur sur toute la fenêtre ; sur deux lignes si elle
+        // est trop étroite.
+        let width = (ui.available_width() - 5.0 * ui.spacing().item_spacing.x) / 6.0;
+        let draw = |ui: &mut egui::Ui, tab: Tab, selected: bool, width: Option<f32>| {
+            let text = egui::RichText::new(tab.label())
+                .size(13.5)
+                .color(if selected {
+                    egui::Color32::WHITE
+                } else {
+                    MUTED
+                });
+            let button = egui::Button::new(text)
+                .fill(if selected {
+                    ACCENT
+                } else {
+                    egui::Color32::TRANSPARENT
+                })
+                .stroke(egui::Stroke::NONE)
+                .corner_radius(8);
+            match width {
+                Some(width) => ui.add_sized([width, 28.0], button),
+                None => ui.add(button),
+            }
+            .clicked()
+        };
+        let fits = width >= 84.0;
+        let layout = |ui: &mut egui::Ui, current: &mut Tab| {
             for tab in Tab::ALL {
-                let selected = self.tab == tab;
-                let text = egui::RichText::new(tab.label())
-                    .size(14.0)
-                    .color(if selected {
-                        egui::Color32::WHITE
-                    } else {
-                        MUTED
-                    });
-                let button = egui::Button::new(text)
-                    .fill(if selected {
-                        ACCENT
-                    } else {
-                        egui::Color32::TRANSPARENT
-                    })
-                    .stroke(egui::Stroke::NONE)
-                    .corner_radius(8);
-                if ui.add(button).clicked() {
-                    self.tab = tab;
+                if draw(ui, tab, *current == tab, fits.then_some(width)) {
+                    *current = tab;
                 }
             }
-        });
+        };
+        if fits {
+            ui.horizontal(|ui| layout(ui, &mut self.tab));
+        } else {
+            ui.horizontal_wrapped(|ui| layout(ui, &mut self.tab));
+        }
     }
 
-    /// Fichiers glissés sur la fenêtre : envoyés à l'autre PC.
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
         let dropped: Vec<std::path::PathBuf> = ctx.input(|i| {
             i.raw
@@ -549,7 +625,7 @@ impl App {
             );
             if !self.settings.clipboard_history {
                 ui.label(
-                    egui::RichText::new("Historique désactivé dans l'onglet Options.")
+                    egui::RichText::new("Historique désactivé dans l'onglet Réglages.")
                         .color(ORANGE),
                 );
             } else if self.history.is_empty() {
@@ -686,6 +762,11 @@ impl App {
                 ui.label(egui::RichText::new(short).strong().size(17.0).color(TEXT));
             });
             ui.label(egui::RichText::new(detail).color(MUTED));
+            let hint = self.shared.lock().expect("verrou").hint.clone();
+            if running && let Some(hint) = hint {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(hint).color(ORANGE));
+            }
             if self.settings.bluetooth && self.bluetooth_checked.elapsed() > Duration::from_secs(3)
             {
                 // La liaison Bluetooth peut s'établir pendant que la fenêtre est ouverte.
@@ -694,35 +775,11 @@ impl App {
                 self.bluetooth_checked = Instant::now();
                 ui.ctx().request_repaint_after(Duration::from_secs(3));
             }
-            let (address, label) = if self.settings.bluetooth {
-                (self.bluetooth_ip, "Adresse Bluetooth de ce PC")
+            let address = if self.settings.bluetooth {
+                self.bluetooth_ip
             } else {
-                (self.local_ip, "Adresse de ce PC")
+                self.local_ip
             };
-            if self.settings.bluetooth && address.is_none() {
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new(
-                        "Bluetooth direct : aucune adresse à saisir, les deux PC se trouvent seuls.",
-                    )
-                    .color(MUTED),
-                );
-            }
-            if let Some(ip) = address {
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(label).color(MUTED));
-                    ui.label(
-                        egui::RichText::new(ip.to_string())
-                            .monospace()
-                            .size(16.0)
-                            .color(TEXT),
-                    );
-                    if ui.small_button("Copier").clicked() {
-                        ui.ctx().copy_text(ip.to_string());
-                    }
-                });
-            }
             if running {
                 let (link, bt, mic) = {
                     let shared = self.shared.lock().expect("verrou");
@@ -742,65 +799,97 @@ impl App {
                     mic_line(ui, &mic);
                 }
             }
+            // Adresse réseau : utile seulement si les PC ne se trouvent pas seuls.
+            if let Some(ip) = address {
+                ui.add_space(4.0);
+                egui::CollapsingHeader::new(
+                    egui::RichText::new("Les PC ne se trouvent pas ?")
+                        .small()
+                        .color(MUTED),
+                )
+                .id_salt("adresse")
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(
+                            "Sur l'autre PC, choisissez « Ce PC rejoint l'autre » et saisissez \
+                             cette adresse :",
+                        )
+                        .small()
+                        .color(MUTED),
+                    );
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(ip.to_string())
+                                .monospace()
+                                .size(16.0)
+                                .color(TEXT),
+                        );
+                        if ui.small_button("Copier").clicked() {
+                            ui.ctx().copy_text(ip.to_string());
+                        }
+                    });
+                });
+            }
         });
 
         ui.add_enabled_ui(!running, |ui| {
             let s = &mut self.settings;
             card(ui, |ui| {
-                section_title(ui, "Rôle de ce PC");
+                section_title(ui, "Qui attend qui ?");
                 ui.columns(2, |cols| {
                     choice_tile(
                         &mut cols[0],
                         &mut s.connect,
                         false,
-                        "Attendre l'autre PC",
-                        "L'autre PC se connecte à celui-ci",
+                        "Ce PC attend l'autre",
+                        "Conseillé pour le PC où est branchée la souris",
                     );
                     choice_tile(
                         &mut cols[1],
                         &mut s.connect,
                         true,
-                        "Se connecter",
                         "Ce PC rejoint l'autre",
+                        "Choisissez-le sur un seul des deux PC",
                     );
                 });
                 if s.connect && s.bluetooth {
                     ui.add_space(4.0);
                     ui.label(
-                        egui::RichText::new(
-                            "Liaison Bluetooth : aucune adresse à saisir, l'autre PC est trouvé \
-                             en Bluetooth.",
-                        )
-                        .color(MUTED),
+                        egui::RichText::new("Rien à saisir : l'autre PC est trouvé en Bluetooth.")
+                            .color(MUTED),
                     );
                 } else if s.connect {
                     ui.add_space(4.0);
-                    field(ui, "Adresse de l'autre PC (facultatif)", |ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut s.address)
-                                .hint_text("vide : trouvé tout seul sur le réseau")
-                                .desired_width(f32::INFINITY),
-                        );
-                    });
+                    field(
+                        ui,
+                        "Adresse de l'autre PC (à laisser vide en général)",
+                        |ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut s.address)
+                                    .hint_text("vide : l'autre PC est trouvé tout seul")
+                                    .desired_width(f32::INFINITY),
+                            );
+                        },
+                    );
                 }
             });
 
             card(ui, |ui| {
-                section_title(ui, "Liaison entre les deux PC");
+                section_title(ui, "Comment les deux PC communiquent");
                 ui.columns(2, |cols| {
                     choice_tile(
                         &mut cols[0],
                         &mut s.bluetooth,
                         false,
-                        "Réseau (câble ou Wi-Fi)",
-                        "Recommandé : son sans perte",
+                        "Par la box ou le Wi-Fi",
+                        "Recommandé : le plus rapide, son parfait",
                     );
                     choice_tile(
                         &mut cols[1],
                         &mut s.bluetooth,
                         true,
-                        "Bluetooth",
-                        "Sans réseau, son compressé",
+                        "Par Bluetooth",
+                        "Si les PC ne sont pas sur le même réseau",
                     );
                 });
                 if s.bluetooth {
@@ -810,14 +899,22 @@ impl App {
             });
 
             card(ui, |ui| {
-                section_title(ui, "Sécurité");
+                section_title(ui, "Mot de passe");
+                ui.label(
+                    egui::RichText::new(
+                        "Inventez un mot de passe et saisissez le même sur les deux PC : il \
+                         empêche tout autre ordinateur de prendre le contrôle.",
+                    )
+                    .small()
+                    .color(MUTED),
+                );
                 field(ui, "Mot de passe (identique sur les deux PC)", |ui| {
                     ui.horizontal(|ui| {
                         ui.add(
                             egui::TextEdit::singleline(&mut s.password)
                                 .password(!self.show_password)
                                 .hint_text("8 caractères minimum")
-                                .desired_width(ui.available_width() - 70.0),
+                                .desired_width(ui.available_width() - 90.0),
                         );
                         let eye = if self.show_password {
                             "Masquer"
@@ -829,7 +926,7 @@ impl App {
                         }
                     });
                 });
-                field(ui, "Nom de ce PC (affiché chez l'autre)", |ui| {
+                field(ui, "Nom de ce PC (affiché sur l'autre PC)", |ui| {
                     ui.add(
                         egui::TextEdit::singleline(&mut s.name)
                             .hint_text("nom de l'ordinateur")
@@ -968,15 +1065,15 @@ impl App {
             let inputs = &self.inputs;
             let s = &mut self.settings;
             card(ui, |ui| {
-                section_title(ui, "PC principal");
+                section_title(ui, "Votre PC principal");
                 ui.checkbox(
                     &mut s.main,
-                    "Ce PC est mon PC principal (souris, clavier et casque branchés dessus)",
+                    "Ma souris, mon clavier et mon casque sont branchés sur ce PC",
                 );
                 ui.label(
                     egui::RichText::new(
-                        "À cocher sur un seul des deux PC : il reçoit le son de l'autre en permanence \
-                         et lui prête son micro.",
+                        "À cocher sur un seul des deux PC. Vous entendez alors le son de l'autre PC \
+                         dans votre casque, et votre micro fonctionne aussi sur l'autre PC.",
                     )
                     .small()
                     .color(MUTED),
@@ -984,28 +1081,29 @@ impl App {
             });
             card(ui, |ui| {
                 if s.main {
-                    section_title(ui, "Son et micro de ce PC principal");
-                    output_combo(ui, "sound_output", "Son de l'autre PC joué sur", &mut s.sound_output, outputs);
-                    mode_combo(ui, "mic", "Mon micro envoyé à l'autre PC", &mut s.mic, "quand je le contrôle");
+                    section_title(ui, "Son et micro");
+                    output_combo(ui, "sound_output", "Où écouter le son de l'autre PC", &mut s.sound_output, outputs);
+                    mode_combo(ui, "mic", "Utiliser mon micro sur l'autre PC", &mut s.mic, "quand je l'utilise");
                     if s.mic != Mode::Off {
-                        device_combo(ui, "mic_device", "Micro utilisé", "micro par défaut", &mut s.mic_device, inputs);
+                        device_combo(ui, "mic_device", "Quel micro", "micro habituel", &mut s.mic_device, inputs);
                         ui.label(
                             egui::RichText::new(
-                                "Casque Bluetooth : utiliser son micro le fait passer en « mode téléphone » \
-                                 (son mono, qualité radio). Avec « micro par défaut », one-mouse prend \
-                                 automatiquement un autre micro (intégré au PC, webcam…) s'il en existe un.",
+                                "Casque Bluetooth : son micro dégrade fortement le son (qualité \
+                                 téléphone). Avec « micro habituel », one-mouse prend de lui-même un \
+                                 autre micro (celui du PC, de la webcam…) s'il y en a un.",
                             )
                             .small()
                             .color(ORANGE),
                         );
                     }
                 } else {
-                    section_title(ui, "Son et micro de ce PC");
+                    section_title(ui, "Son et micro");
                     if audio::virtual_mic_installed(outputs) == Some(false) {
                         ui.label(
                             egui::RichText::new(
-                                "Pour que les applications de ce PC utilisent le micro du PC qui contrôle, \
-                                 installez le micro virtuel gratuit, puis redémarrez ce PC.",
+                                "Pour que vos applications (Discord, Teams…) de ce PC entendent le \
+                                 micro de votre PC principal, installez ce petit logiciel gratuit \
+                                 une seule fois, puis redémarrez ce PC.",
                             )
                             .color(ORANGE),
                         );
@@ -1014,16 +1112,16 @@ impl App {
                         } else {
                             ("VB-Cable", "https://vb-audio.com/Cable/")
                         };
-                        if ui.button(format!("Installer le micro virtuel ({name})")).clicked() {
+                        if ui.button(format!("Installer {name} (gratuit)")).clicked() {
                             open_url(url);
                         }
                     }
-                    mode_combo(ui, "sound", "Son de ce PC envoyé", &mut s.sound, "quand l'autre PC le contrôle");
-                    output_combo(ui, "mic_output", "Micro de l'autre PC envoyé vers", &mut s.mic_output, outputs);
+                    mode_combo(ui, "sound", "Envoyer le son de ce PC", &mut s.sound, "quand l'autre PC le pilote");
+                    output_combo(ui, "mic_output", "Micro de l'autre PC (réglage avancé)", &mut s.mic_output, outputs);
                     ui.label(
                         egui::RichText::new(
-                            "Pendant la connexion, le micro du PC qui contrôle devient automatiquement le \
-                             micro par défaut de ce PC (Linux, Windows) ; l'ancien est rétabli à l'arrêt.",
+                            "Pendant le partage, le micro de votre PC principal devient le micro de ce \
+                             PC ; l'ancien revient à l'arrêt.",
                         )
                         .small()
                         .color(MUTED),
@@ -1033,10 +1131,10 @@ impl App {
         });
         ui.add_enabled_ui(!running, |ui| {
             card(ui, |ui| {
-                section_title(ui, "Qualité du son envoyé");
+                section_title(ui, "Qualité du son");
                 let label = |q: Quality| match q {
-                    Quality::Lossless => "Sans perte (réseau local rapide)",
-                    Quality::Compressed => "Compressé, Opus (Wi-Fi faible)",
+                    Quality::Lossless => "Parfaite (recommandé)",
+                    Quality::Compressed => "Économie (Wi-Fi lent ou chargé)",
                 };
                 let quality = &mut self.settings.sound_quality;
                 egui::ComboBox::from_id_salt("quality")
@@ -1049,8 +1147,8 @@ impl App {
                     });
                 ui.label(
                     egui::RichText::new(
-                        "Sans perte : le son arrive exactement tel qu'il sort du PC (~3 Mbit/s). \
-                         Compressé : six fois moins de données, pour un Wi-Fi saturé.",
+                        "Parfaite : le son arrive exactement comme sur le PC d'origine. Économie : \
+                         utilise six fois moins le réseau, si le son coupe en Wi-Fi.",
                     )
                     .small()
                     .color(MUTED),
@@ -1058,9 +1156,8 @@ impl App {
                 if self.settings.bluetooth {
                     ui.label(
                         egui::RichText::new(
-                            "Liaison Bluetooth choisie : quand la connexion passe vraiment par \
-                             le Bluetooth, le son est compressé pour tenir dans son débit (par le \
-                             réseau, il reste sans perte).",
+                            "En Bluetooth, le son est toujours légèrement compressé, le \
+                             Bluetooth étant plus lent.",
                         )
                         .small()
                         .color(ORANGE),
@@ -1069,7 +1166,7 @@ impl App {
             });
         });
         if ui
-            .small_button("Actualiser la liste des périphériques audio")
+            .small_button("Actualiser la liste des casques et micros")
             .clicked()
         {
             self.outputs = audio::output_names();
@@ -1242,7 +1339,7 @@ impl App {
         }
     }
 
-    /// Carte « Mises à jour » de l'onglet Options.
+    /// Carte « Mises à jour » de l'onglet Réglages.
     fn update_card(&mut self, ui: &mut egui::Ui) {
         use crate::update::UpdateState;
         card(ui, |ui| {
@@ -1327,53 +1424,65 @@ impl App {
                 section_title(ui, "Partage");
                 ui.checkbox(
                     &mut s.clipboard,
-                    "Partager le presse-papier (texte, images et fichiers)",
+                    "Copier sur un PC, coller sur l'autre (texte, images, fichiers)",
                 )
                 .on_hover_text(
                     "Copiez sur un PC, collez sur l'autre avec Ctrl+V. Les fichiers copiés sont \
                      transférés (1 Go au plus par copie) dans Téléchargements/one-mouse/Presse-papier.",
                 );
                 ui.checkbox(
-                    &mut s.start_sharing,
-                    "Démarrer le partage à l'ouverture de one-mouse",
+                    &mut s.clipboard_history,
+                    "Garder les 20 dernières copies (effacées à la fermeture)",
                 );
-                ui.checkbox(&mut s.lock_sync, "Verrouiller les deux PC ensemble")
+                ui.checkbox(
+                    &mut s.start_sharing,
+                    "Démarrer le partage dès l'ouverture de one-mouse",
+                );
+            });
+            card(ui, |ui| {
+                section_title(ui, "Les deux PC ensemble");
+                ui.checkbox(&mut s.lock_sync, "Verrouiller les deux PC en même temps")
                     .on_hover_text(
                         "Verrouiller un PC (Windows+L…) verrouille aussi l'autre. Chacun se \
                          déverrouille ensuite avec son propre mot de passe.",
                     );
                 ui.checkbox(
                     &mut s.keep_awake,
-                    "Empêcher la mise en veille pendant la connexion",
+                    "Empêcher les PC de se mettre en veille pendant le partage",
                 )
                 .on_hover_text(
                     "Aucun des deux PC ne s'endort tant qu'ils sont connectés : son, micro et \
                      souris restent disponibles. L'écran peut toujours s'éteindre.",
                 );
-                ui.checkbox(
-                    &mut s.clipboard_history,
-                    "Garder l'historique du presse-papier (effacé à la fermeture)",
-                );
-                ui.checkbox(&mut s.wake, "Réveiller l'autre PC au démarrage du partage")
-                    .on_hover_text(
-                        "S'il est en veille, l'autre PC est réveillé par le réseau (Wake-on-LAN). \
-                         Sa carte réseau doit avoir le réveil activé ; il faut s'être connecté \
-                         une fois par le réseau pour connaître son adresse.",
-                    );
             });
+            card(ui, |ui| {
+                section_title(ui, "Allumer l'autre PC à distance");
+                ui.checkbox(&mut s.wake, "Sortir l'autre PC de veille au démarrage du partage")
+                    .on_hover_text(
+                        "Fonctionne si l'autre PC est branché par câble à la box et a été préparé \
+                         (bouton ci-dessous, sur l'autre PC). Il faut s'être connecté une fois.",
+                    );
+                ui.label(
+                    egui::RichText::new(
+                        "À faire une fois sur le PC à allumer : « Préparer ce PC ». Il doit être \
+                         branché par câble à la box.",
+                    )
+                    .small()
+                    .color(MUTED),
+                );
             if let Some(peer) = crate::wake::known_peer() {
                 if ui
-                    .button(format!("Réveiller « {} » maintenant", peer.name))
+                    .button(format!("Allumer « {} » maintenant", peer.name))
                     .clicked()
                     && crate::wake::send(&peer.macs).is_err()
                 {
-                    self.error = Some("Envoi du signal de réveil impossible.".into());
+                    self.error = Some("Impossible d'envoyer le signal d'allumage.".into());
                 }
                 if !peer.wired {
                     ui.label(
                         egui::RichText::new(format!(
                             "« {} » n'est relié qu'en Wi-Fi : il ne pourra sans doute pas être \
-                             réveillé. Branchez-le par câble (Ethernet).",
+                             allumé à distance. Branchez-le par câble à la box.",
                             peer.name
                         ))
                         .small()
@@ -1382,24 +1491,23 @@ impl App {
                 }
             }
             if ui
-                .button("Préparer ce PC à être réveillé")
+                .button("Préparer ce PC pour être allumé à distance")
                 .on_hover_text(
-                    "À faire une fois sur le PC à réveiller (droits d'administrateur) : \
-                     active le réveil par le réseau sur ses cartes filaires. Sous Windows, \
-                     désactive aussi le démarrage rapide, sans quoi un PC éteint ne se \
-                     réveille pas. Selon le PC, le réveil par le réseau (Wake on LAN) doit \
-                     aussi être activé dans le BIOS.",
+                    "Demande l'autorisation de l'administrateur. Active le réveil par le \
+                     réseau sur ce PC (et, sous Windows, désactive le « démarrage rapide », \
+                     qui l'empêche). Sur certains PC, il faut aussi activer « Wake on LAN » \
+                     dans le BIOS.",
                 )
                 .clicked()
             {
                 match crate::wake::prepare_this_pc() {
                     Some(Ok(())) => {
                         self.error = None;
-                        self.notice = Some("Ce PC peut maintenant être réveillé à distance.".into());
+                        self.notice = Some("Ce PC peut maintenant être allumé à distance.".into());
                     }
                     Some(Err(e)) => {
                         self.notice = None;
-                        self.error = Some(format!("Réveil à distance : {e:#}"));
+                        self.error = Some(format!("Allumage à distance : {e:#}"));
                     }
                     None => {
                         self.error = Some(
@@ -1410,6 +1518,7 @@ impl App {
                     }
                 }
             }
+            });
         });
         self.update_card(ui);
         card(ui, |ui| {
@@ -1522,12 +1631,13 @@ fn link_line(ui: &mut egui::Ui, link: LinkStatus) {
     let (color, text) = match link {
         LinkStatus::Bluetooth => (
             ACCENT,
-            "Liaison : Bluetooth — son compressé (Opus) pour tenir dans son débit",
+            "Relié en Bluetooth — son légèrement compressé pour passer en Bluetooth",
         ),
-        LinkStatus::Udp => (GREEN, "Liaison : réseau local — son sans perte en UDP"),
+        LinkStatus::Udp => (GREEN, "Relié par le réseau — son en qualité parfaite"),
         LinkStatus::Tcp => (
-            MUTED,
-            "Liaison : réseau local — son par TCP (si cela dure, le pare-feu bloque l'UDP)",
+            ORANGE,
+            "Relié par le réseau, son en mode de secours (un peu plus de retard) : \
+             autorisez one-mouse dans le pare-feu (onglet Réglages)",
         ),
     };
     ui.label(egui::RichText::new(text).color(color));
@@ -1538,36 +1648,39 @@ fn bluetooth_line(ui: &mut egui::Ui, bt: &BtStatus) {
     let (color, text) = match bt {
         BtStatus::Visible => (
             GREEN,
-            "Bluetooth : ce PC est visible et attend l'autre PC".to_owned(),
+            "Bluetooth : ce PC est prêt, il attend l'autre PC".to_owned(),
         ),
-        BtStatus::Searching(_) => (
-            MUTED,
-            "Bluetooth : recherche de l'autre PC parmi les PC associés…".to_owned(),
-        ),
+        BtStatus::Searching(_) => (MUTED, "Bluetooth : recherche de l'autre PC…".to_owned()),
         BtStatus::Error(message) => (RED, format!("Bluetooth : {message}")),
     };
     ui.label(egui::RichText::new(text).color(color));
 }
 
-/// Ligne d'état du micro dans l'onglet Connexion.
+/// Ligne d'état du micro dans l'onglet Accueil.
 fn mic_line(ui: &mut egui::Ui, mic: &MicStatus) {
     let (color, text) = match mic {
-        MicStatus::Sending(name) => (GREEN, format!("Micro envoyé à l'autre PC : « {name} »")),
+        MicStatus::Sending(name) => (
+            GREEN,
+            format!("Votre micro « {name} » est utilisable sur l'autre PC"),
+        ),
         MicStatus::Default(name) => (
             GREEN,
-            format!("Micro de l'autre PC reçu : « {name} » est le micro par défaut de ce PC"),
+            format!(
+                "Le micro de l'autre PC est utilisable ici (vos applications le voient comme \
+                 « {name} »)"
+            ),
         ),
         MicStatus::NotDefault(name) => (
             ORANGE,
             format!(
-                "Micro de l'autre PC reçu dans « {name} », mais il n'a pas pu devenir le micro \
-                 par défaut : choisissez « {name} » comme micro dans Windows ou vos applications"
+                "Le micro de l'autre PC arrive dans « {name} » : choisissez « {name} » comme \
+                 micro dans les réglages de son de ce PC ou de votre application"
             ),
         ),
         MicStatus::NoVirtual => (
             RED,
-            "Micro de l'autre PC reçu mais inutilisable : aucun micro virtuel sur ce PC. \
-             Vos applications utilisent encore le micro de ce PC."
+            "Le micro de l'autre PC ne peut pas encore être utilisé ici : installez le \
+             petit logiciel gratuit ci-dessous (une seule fois)."
                 .to_owned(),
         ),
     };
@@ -1579,9 +1692,7 @@ fn mic_line(ui: &mut egui::Ui, mic: &MicStatus) {
             ("VB-Cable", "https://vb-audio.com/Cable/")
         };
         if ui
-            .button(format!(
-                "Installer le micro virtuel ({name}), puis redémarrer le PC"
-            ))
+            .button(format!("Installer {name} (gratuit), puis redémarrer ce PC"))
             .clicked()
         {
             open_url(url);
@@ -1678,11 +1789,11 @@ impl Tab {
 
     fn label(self) -> &'static str {
         match self {
-            Tab::Connection => "Connexion",
+            Tab::Connection => "Accueil",
             Tab::Screens => "Écrans",
-            Tab::Sound => "Son",
+            Tab::Sound => "Son et micro",
             Tab::Clipboard => "Presse-papier",
-            Tab::Options => "Options",
+            Tab::Options => "Réglages",
             Tab::Log => "Journal",
         }
     }
@@ -1717,6 +1828,28 @@ fn apply_theme(ctx: &egui::Context) {
         style.spacing.item_spacing = egui::vec2(8.0, 8.0);
         style.spacing.button_padding = egui::vec2(12.0, 6.0);
         style.spacing.interact_size.y = 26.0;
+        // Textes plus grands que ceux d'egui par défaut : lisibles par tous.
+        use egui::{FontFamily, FontId, TextStyle};
+        style.text_styles = [
+            (
+                TextStyle::Small,
+                FontId::new(12.0, FontFamily::Proportional),
+            ),
+            (TextStyle::Body, FontId::new(14.5, FontFamily::Proportional)),
+            (
+                TextStyle::Button,
+                FontId::new(14.5, FontFamily::Proportional),
+            ),
+            (
+                TextStyle::Heading,
+                FontId::new(20.0, FontFamily::Proportional),
+            ),
+            (
+                TextStyle::Monospace,
+                FontId::new(13.0, FontFamily::Monospace),
+            ),
+        ]
+        .into();
     });
 }
 
@@ -1779,8 +1912,8 @@ fn bluetooth_steps(ui: &mut egui::Ui, peer: Option<&crate::bluetooth::KnownPeer>
     if cfg!(target_os = "macos") {
         ui.label(
             egui::RichText::new(
-                "Bluetooth direct pas encore disponible sous macOS : choisissez la liaison par \
-                 le réseau.",
+                "Le Bluetooth n'est pas encore disponible sur Mac : choisissez « Par la box ou \
+                 le Wi-Fi ».",
             )
             .color(ORANGE),
         );
@@ -1789,18 +1922,17 @@ fn bluetooth_steps(ui: &mut egui::Ui, peer: Option<&crate::bluetooth::KnownPeer>
     match peer {
         Some(peer) => ui.label(
             egui::RichText::new(format!(
-                "Autre PC connu : « {} » ({}), appris lors d'une connexion par le réseau. Le \
-                 Bluetooth le vise directement ; s'ils ne sont pas encore associés, le système \
-                 propose l'association (un clic sur chaque PC).",
-                peer.name,
-                crate::bluetooth::format_address(peer.address)
+                "« {} » est déjà connu : les deux PC se retrouveront directement en Bluetooth. \
+                 S'ils ne sont pas encore associés, le système le proposera (un clic sur \
+                 chaque PC).",
+                peer.name
             ))
             .color(GREEN),
         ),
         None => ui.label(
             egui::RichText::new(
-                "Astuce : connectez-vous une fois par le réseau, les deux PC apprennent alors \
-                 leurs adresses Bluetooth et se retrouvent ensuite directement.",
+                "Astuce : connectez-vous une fois par la box ou le Wi-Fi ; les deux PC se \
+                 retrouveront ensuite tout seuls en Bluetooth.",
             )
             .small()
             .color(MUTED),
@@ -1809,9 +1941,9 @@ fn bluetooth_steps(ui: &mut egui::Ui, peer: Option<&crate::bluetooth::KnownPeer>
     step(
         ui,
         "1.",
-        "Une seule fois : démarrez le partage sur le PC qui attend (il devient visible), puis \
-         sur l'autre PC cliquez sur « Associer en Bluetooth », choisissez le premier PC et \
-         confirmez le code affiché sur les deux.",
+        "Une seule fois : démarrez le partage sur le PC qui attend, puis sur l'autre PC \
+         cliquez sur « Associer en Bluetooth », choisissez le premier PC dans la liste et \
+         confirmez le code affiché sur les deux écrans.",
     );
     if ui.button("Associer en Bluetooth").clicked() {
         crate::bluetooth::open_settings();
@@ -1819,14 +1951,14 @@ fn bluetooth_steps(ui: &mut egui::Ui, peer: Option<&crate::bluetooth::KnownPeer>
     step(
         ui,
         "2.",
-        "Ensuite, démarrez simplement le partage sur les deux PC : ils se retrouvent tout seuls \
-         en Bluetooth, sans adresse à saisir.",
+        "Ensuite, il suffit de démarrer le partage sur les deux PC : ils se retrouvent tout \
+         seuls.",
     );
     ui.label(
         egui::RichText::new(
-            "Débit du Bluetooth limité (1 à 2 Mbit/s) : le son est compressé (Opus 128 kbit/s), \
-             avec un peu plus de latence, et la portée est d'une dizaine de mètres. Le réseau \
-             local reste le meilleur choix pour un son parfait.",
+            "Le Bluetooth est plus lent que la box : le son y est légèrement compressé et \
+             arrive avec un peu plus de retard, et les PC doivent rester à moins d'une dizaine \
+             de mètres. La box ou le Wi-Fi restent le meilleur choix.",
         )
         .small()
         .color(MUTED),
