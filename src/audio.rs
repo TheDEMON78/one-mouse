@@ -1080,8 +1080,11 @@ impl Converter {
             self.history = mapped[..out_ch].repeat(HISTORY);
         }
 
-        // 2. Même fréquence et pas de correction : copie directe.
-        if frame.rate == self.out_rate && speed == 1.0 {
+        // 2. Même fréquence, pas de correction et aucun reste d'interpolation :
+        // copie directe. Une fois l'interpolation commencée (correction de
+        // dérive), on la poursuit : revenir à la copie directe sauterait les
+        // trames gardées pour le filtre et ferait un clic.
+        if frame.rate == self.out_rate && speed == 1.0 && self.pos == HISTORY as f64 {
             self.history.extend_from_slice(&mapped);
             let excess = self.history.len() - HISTORY * out_ch;
             self.history.drain(..excess);
@@ -1291,6 +1294,33 @@ mod tests {
             max_err = max_err.max((v as f64 - ideal).abs());
         }
         assert!(max_err < 0.002, "erreur max {max_err}");
+    }
+
+    /// La correction de dérive s'active et s'arrête en cours de lecture : pas de
+    /// saut dans le son (un saut s'entendait comme un clic).
+    #[test]
+    fn drift_correction_toggling_is_seamless() {
+        let mut conv = Converter::new(48_000, 1);
+        let mut out = Vec::new();
+        let mut t = 0usize;
+        for packet in 0..400 {
+            let samples = (0..240)
+                .map(|i| {
+                    let v = (2.0 * std::f32::consts::PI * 1000.0 * (t + i) as f32 / 48_000.0).sin();
+                    (v * 16384.0) as i16
+                })
+                .collect();
+            t += 240;
+            let speed = if (packet / 10) % 2 == 1 { 1.001 } else { 1.0 };
+            out.extend(conv.convert(&frame(48_000, 1, samples), speed));
+        }
+        // Différence seconde d'un sinus de 1 kHz d'amplitude 0,5 : 0,0086 au plus.
+        let worst = out
+            .windows(3)
+            .skip(1000)
+            .map(|w| (w[0] - 2.0 * w[1] + w[2]).abs())
+            .fold(0.0, f32::max);
+        assert!(worst < 0.012, "saut de {worst}");
     }
 
     #[test]
