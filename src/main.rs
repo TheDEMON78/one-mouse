@@ -15,6 +15,7 @@ mod clipboard;
 mod codec;
 mod crypto;
 mod default_mic;
+mod default_output;
 mod firewall;
 mod gui;
 mod network;

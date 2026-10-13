@@ -102,6 +102,9 @@ saisissant l'adresse de l'autre PC. En ligne de commande : `--bluetooth`, et `co
   - L'onglet Connexion indique en direct le micro envoyé, et sur l'autre PC si le micro reçu est bien devenu le
     micro par défaut (sinon : quoi installer ou choisir).
   - Le PC principal n'envoie jamais un micro virtuel resté par défaut : il prend alors son vrai micro.
+  - **Jamais d'écho de votre voix** : si un câble virtuel est devenu la sortie son par défaut (VB-Cable le fait souvent
+    à son installation), one-mouse remet vos haut-parleurs ou votre casque par défaut. Sous Windows, laissez décochée
+    l'option « Écouter ce périphérique » de « CABLE Output » (Panneau de configuration Son → Enregistrement).
 - Sans PC principal coché, le dernier PC à avoir pris la main en tient lieu : dès que vous passez une fois sur l'autre
   PC, son son vous parvient en permanence. Jamais d'écho : le son ne va que dans un sens, le micro dans l'autre.
 - **Toujours là** : si une capture ou une lecture s'interrompt (casque débranché, carte son réinitialisée), elle

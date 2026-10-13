@@ -380,12 +380,41 @@ fn capture_device(
     }
 }
 
+/// Sortie par défaut, jamais un câble virtuel : le micro reçu de l'autre PC y est
+/// joué, il serait capturé avec le son du PC et renvoyé (on s'entendrait en écho).
+fn real_default_output(host: &Host) -> Result<Device> {
+    let device = host
+        .default_output_device()
+        .context("aucune sortie audio trouvée")?;
+    let is_virtual = |d: &Device| {
+        crate::default_output::is_virtual_output(&format!("{} {}", device_label(d), id_string(d)))
+    };
+    if !is_virtual(&device) {
+        return Ok(device);
+    }
+    let cable = device_label(&device);
+    if let Some(real) = crate::default_output::leave_virtual_output() {
+        log::warn!(
+            "la sortie son par défaut était le câble virtuel « {cable} » : le micro reçu y était \
+             renvoyé (écho). « {real} » remise par défaut"
+        );
+        let device = host
+            .default_output_device()
+            .context("aucune sortie audio trouvée")?;
+        if !is_virtual(&device) {
+            return Ok(device);
+        }
+    }
+    bail!(
+        "la sortie son par défaut de ce PC est le câble virtuel « {cable} » : le micro de l'autre \
+         PC y repartirait en écho. Choisissez vos haut-parleurs ou votre casque comme sortie par \
+         défaut"
+    )
+}
+
 #[cfg(target_os = "linux")]
 fn system_loopback(host: &Host) -> Result<(Device, SupportedStreamConfig)> {
-    let sink = host
-        .default_output_device()
-        .context("aucune sortie audio trouvée")?
-        .id()?;
+    let sink = real_default_output(host)?.id()?;
     let monitor = format!("{}.monitor", sink.id());
     let device = host
         .input_devices()?
@@ -400,9 +429,7 @@ fn system_loopback(host: &Host) -> Result<(Device, SupportedStreamConfig)> {
 #[cfg(not(target_os = "linux"))]
 fn system_loopback(host: &Host) -> Result<(Device, SupportedStreamConfig)> {
     // Windows (WASAPI) et macOS 14.6+ : un flux d'entrée sur une sortie capture ce qu'elle joue.
-    let device = host
-        .default_output_device()
-        .context("aucune sortie audio trouvée")?;
+    let device = real_default_output(host)?;
     let config = device.default_output_config()?;
     Ok((device, config))
 }
