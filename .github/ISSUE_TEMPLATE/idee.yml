@@ -1,0 +1,11 @@
+name: Idée
+description: Proposer une amélioration ou une nouvelle fonctionnalité
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idee
+    attributes:
+      label: Votre idée
+      description: Ce que vous aimeriez pouvoir faire, et dans quelle situation.
+    validations:
+      required: true

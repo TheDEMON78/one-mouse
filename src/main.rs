@@ -21,6 +21,7 @@ mod protocol;
 mod session;
 mod settings;
 mod status;
+mod tray;
 
 use std::time::Duration;
 
@@ -53,6 +54,10 @@ struct Cli {
     /// Écrit les changements d'état sur la sortie standard (utilisé par la fenêtre).
     #[arg(long, global = true, hide = true)]
     status: bool,
+
+    /// Ouvre la fenêtre directement réduite dans la zone de notification (Windows).
+    #[arg(long, hide = true)]
+    tray: bool,
 
     /// Position de l'autre PC par rapport à celui-ci.
     #[arg(long, value_enum, global = true, default_value = "right")]
@@ -140,7 +145,7 @@ fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let mut cli = Cli::parse();
     let Some(mode) = cli.mode.take() else {
-        return gui::run();
+        return gui::run(cli.tray);
     };
     if cli.status {
         status::enable();

@@ -1,0 +1,34 @@
+name: Problème
+description: Quelque chose ne fonctionne pas comme prévu
+labels: [bug]
+body:
+  - type: textarea
+    id: probleme
+    attributes:
+      label: Que se passe-t-il ?
+      description: Ce que vous faisiez, ce qui s'est passé, et ce que vous attendiez.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version de one-mouse
+      description: Affichée en haut de la fenêtre (par exemple 1.0.23).
+    validations:
+      required: true
+  - type: textarea
+    id: systemes
+    attributes:
+      label: Les deux PC
+      description: Système de chaque PC (Windows 11, Ubuntu 24.04 X11/Wayland, macOS 15…) et lequel est le PC principal.
+      placeholder: |
+        PC principal : Windows 11
+        Autre PC : Ubuntu 24.04 (Wayland)
+    validations:
+      required: true
+  - type: textarea
+    id: journal
+    attributes:
+      label: Journal
+      description: Copiez le contenu de l'onglet « Journal » des deux PC (le mot de passe n'y figure jamais).
+      render: text

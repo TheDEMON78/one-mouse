@@ -40,7 +40,8 @@ mod imp {
 
     pub fn set_enabled(enabled: bool, exe: PathBuf) -> Result<()> {
         let ok = if enabled {
-            let command = format!("\"{}\"", exe.display());
+            // Au démarrage de la session : directement dans la zone de notification.
+            let command = format!("\"{}\" --tray", exe.display());
             reg(&[
                 "add", RUN_KEY, "/v", VALUE, "/t", "REG_SZ", "/d", &command, "/f",
             ])

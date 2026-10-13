@@ -77,6 +77,8 @@ pub struct Settings {
     pub sound_quality: crate::codec::Quality,
     /// Démarre le partage dès l'ouverture de la fenêtre.
     pub start_sharing: bool,
+    /// Windows : fermer la fenêtre la garde dans la zone de notification.
+    pub tray: bool,
     /// Version du format, pour adapter les anciens réglages (absent = ancien format 0).
     #[serde(default)]
     pub format: u32,
@@ -103,6 +105,7 @@ impl Default for Settings {
             mic_device: String::new(),
             sound_quality: crate::codec::Quality::Lossless,
             start_sharing: false,
+            tray: true,
             format: FORMAT,
         }
     }

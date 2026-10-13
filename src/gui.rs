@@ -18,12 +18,17 @@ use crate::audio::{self, Mode};
 use crate::codec::Quality;
 use crate::settings::{Settings, Side};
 use crate::status::Status;
+use crate::tray::Tray;
 use crate::{autostart, crypto, firewall};
 
 const ICON_PNG: &[u8] = include_bytes!("../assets/icons/256x256.png");
 const MAX_LOG_LINES: usize = 300;
 
-pub fn run() -> Result<()> {
+/// `hidden` : démarre réduit dans la zone de notification (lancement automatique).
+pub fn run(hidden: bool) -> Result<()> {
+    if crate::tray::activate_existing() {
+        return Ok(());
+    }
     let icon = eframe::icon_data::from_png_bytes(ICON_PNG).context("icône invalide")?;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -36,7 +41,7 @@ pub fn run() -> Result<()> {
     eframe::run_native(
         "one-mouse",
         options,
-        Box::new(|cc| Ok(Box::new(App::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(App::new(cc, hidden)))),
     )
     .map_err(|e| anyhow::anyhow!("ouverture de la fenêtre impossible : {e}"))
 }
@@ -184,10 +189,16 @@ struct App {
     error: Option<String>,
     logo: egui::TextureHandle,
     tab: Tab,
+    /// Icône de la zone de notification (Windows).
+    tray: Option<Tray>,
+    /// Images restant à afficher avant de cacher la fenêtre (démarrage réduit).
+    hide_after_frames: Option<u8>,
+    /// Fermeture voulue (menu « Quitter ») : ne pas cacher la fenêtre.
+    quitting: bool,
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, hidden: bool) -> Self {
         apply_theme(&cc.egui_ctx);
         let settings = Settings::load();
         let logo = {
@@ -213,7 +224,18 @@ impl App {
             error: None,
             logo,
             tab: Tab::Connection,
+            tray: Tray::new(cc, ICON_PNG),
+            hide_after_frames: None,
+            quitting: false,
         };
+        if hidden && app.tray.is_some() {
+            // eframe montre la fenêtre après sa première image : on la cache ensuite.
+            app.hide_after_frames = Some(2);
+        }
+        if cfg!(windows) && app.autostart {
+            // Met à jour une ancienne inscription (lancement sans --tray).
+            let _ = autostart::set_enabled(true);
+        }
         if app.settings.start_sharing && app.validate().is_ok() {
             app.start(&cc.egui_ctx);
         }
@@ -608,6 +630,30 @@ impl App {
         }
     }
 
+    /// Fermer la fenêtre la cache dans la zone de notification ; « Quitter » ferme.
+    fn handle_tray(&mut self, ctx: &egui::Context) {
+        let Some(tray) = &self.tray else {
+            return;
+        };
+        if let Some(frames) = self.hide_after_frames {
+            if frames == 0 {
+                self.hide_after_frames = None;
+                tray.hide();
+            } else {
+                self.hide_after_frames = Some(frames - 1);
+                ctx.request_repaint();
+            }
+        }
+        if tray.quit_requested() && !self.quitting {
+            self.quitting = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        if ctx.input(|i| i.viewport().close_requested()) && !self.quitting && self.settings.tray {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            tray.hide();
+        }
+    }
+
     fn options_tab(&mut self, ui: &mut egui::Ui, running: bool) {
         ui.add_enabled_ui(!running, |ui| {
             let s = &mut self.settings;
@@ -630,6 +676,24 @@ impl App {
                 match autostart::set_enabled(autostart) {
                     Ok(()) => self.autostart = autostart,
                     Err(e) => self.error = Some(format!("{e:#}")),
+                }
+            }
+            if self.tray.is_some()
+                && ui
+                    .checkbox(
+                        &mut self.settings.tray,
+                        "Fermer la fenêtre garde one-mouse dans la barre des tâches",
+                    )
+                    .on_hover_text(
+                        "L'icône one-mouse reste en bas à droite, à côté de l'heure : un clic \
+                         rouvre la fenêtre, clic droit → Quitter pour fermer vraiment.",
+                    )
+                    .changed()
+            {
+                // Enregistré tout de suite, sans attendre le prochain démarrage du partage.
+                self.saved.tray = self.settings.tray;
+                if let Err(e) = self.saved.save() {
+                    self.error = Some(format!("Enregistrement des réglages impossible : {e:#}"));
                 }
             }
         });
@@ -1023,6 +1087,7 @@ fn output_combo(ui: &mut egui::Ui, id: &str, label: &str, value: &mut String, ou
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.handle_tray(&ctx);
         let running = self.running();
         if running {
             // L'état change sans action de l'utilisateur : rafraîchissement régulier.

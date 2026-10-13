@@ -5,7 +5,7 @@ edition = "2024"
 description = "Une seule souris et un seul clavier pour deux PC (Windows, Linux, macOS)"
 authors = ["BloopStudio"]
 license = "GPL-3.0-or-later"
-repository = "https://github.com/TheDEMON78/one-mouse-for-two-pc"
+repository = "https://github.com/TheDEMON78/one-mouse"
 
 # Installateurs (cargo-packager). La version est injectée par scripts/version.sh.
 [package.metadata.packager]
@@ -16,7 +16,7 @@ authors = ["BloopStudio"]
 copyright = "Copyright © BloopStudio"
 description = "Une seule souris et un seul clavier pour deux PC"
 long-description = "Partage la souris, le clavier et le presse-papier entre deux PC posés côte à côte, sans partage d'écran."
-homepage = "https://github.com/TheDEMON78/one-mouse-for-two-pc"
+homepage = "https://github.com/TheDEMON78/one-mouse"
 license-file = "LICENSE"
 category = "Utility"
 icons = ["assets/icons/32x32.png", "assets/icons/128x128.png", "assets/icons/256x256.png", "assets/icons/512x512.png"]
@@ -68,6 +68,12 @@ cpal = "0.18.2"
 input-capture = { version = "0.4.0", default-features = false }
 input-emulation = { version = "0.4.0", default-features = false }
 input-event = { version = "0.4.0", default-features = false }
+
+# Icône dans la zone de notification (fermer la fenêtre la garde en bas à droite).
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
+tray-icon = { version = "0.26.1", default-features = false }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
