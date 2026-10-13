@@ -542,12 +542,29 @@ impl App {
                     }
                 } else {
                     section_title(ui, "Son et micro de ce PC");
+                    if audio::virtual_mic_installed(outputs) == Some(false) {
+                        ui.label(
+                            egui::RichText::new(
+                                "Pour que les applications de ce PC utilisent le micro du PC qui contrôle, \
+                                 installez le micro virtuel gratuit, puis redémarrez ce PC.",
+                            )
+                            .color(ORANGE),
+                        );
+                        let (name, url) = if cfg!(target_os = "macos") {
+                            ("BlackHole", "https://existential.audio/blackhole/")
+                        } else {
+                            ("VB-Cable", "https://vb-audio.com/Cable/")
+                        };
+                        if ui.button(format!("Installer le micro virtuel ({name})")).clicked() {
+                            open_url(url);
+                        }
+                    }
                     mode_combo(ui, "sound", "Son de ce PC envoyé", &mut s.sound, "quand l'autre PC le contrôle");
                     output_combo(ui, "mic_output", "Micro de l'autre PC envoyé vers", &mut s.mic_output, outputs);
                     ui.label(
                         egui::RichText::new(
-                            "Le micro du PC principal devient un micro de ce PC : choisissez « Micro-one-mouse » \
-                             (Linux), « CABLE Output » (VB-Cable, Windows) ou BlackHole (macOS) dans vos applications.",
+                            "Pendant la connexion, le micro du PC qui contrôle devient automatiquement le \
+                             micro par défaut de ce PC (Linux, Windows) ; l'ancien est rétabli à l'arrêt.",
                         )
                         .small()
                         .color(MUTED),
@@ -659,6 +676,20 @@ impl App {
                     }
                 });
         });
+    }
+}
+
+/// Ouvre une page dans le navigateur.
+fn open_url(url: &str) {
+    let result = if cfg!(windows) {
+        std::process::Command::new("explorer").arg(url).spawn()
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(url).spawn()
+    } else {
+        std::process::Command::new("xdg-open").arg(url).spawn()
+    };
+    if let Err(e) = result {
+        log::warn!("ouverture de {url} impossible : {e}");
     }
 }
 

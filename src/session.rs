@@ -21,6 +21,7 @@ use crate::audio::{self, AudioCapture, AudioConfig, AudioFrame, AudioPlayer, Sou
 use crate::capture::Capture;
 use crate::clipboard::ClipboardSync;
 use crate::crypto::{self, Psk, Role};
+use crate::default_mic;
 use crate::protocol::{self, AudioKind, MAX_CLIPBOARD_LEN, Message, PeerInfo};
 use crate::status::{self, Status};
 
@@ -272,6 +273,8 @@ struct AudioState {
     mic: AudioLink,
     /// Sortie où est joué le micro reçu (micro virtuel), une fois choisie.
     mic_output: Option<String>,
+    /// Micro virtuel mis par défaut pendant la connexion (rétabli à la fin).
+    _default_mic: Option<default_mic::DefaultMicGuard>,
 }
 
 impl AudioState {
@@ -438,6 +441,7 @@ async fn on_message(
                         match output {
                             Some(output) => {
                                 log::info!("micro de l'autre PC disponible via « {output} »");
+                                audio._default_mic = default_mic::switch_to_virtual(&output);
                                 audio.mic_output = Some(output);
                             }
                             None => {

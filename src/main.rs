@@ -12,8 +12,10 @@ mod autostart;
 mod capture;
 mod clipboard;
 mod crypto;
+mod default_mic;
 mod firewall;
 mod gui;
+mod powershell;
 mod protocol;
 mod session;
 mod settings;
@@ -169,6 +171,23 @@ fn attach_console() {
     }
 }
 
+/// Ctrl+C, ou SIGTERM sous Unix (arrêt du système, `kill`) : dans les deux cas
+/// l'arrêt est propre (curseur rendu, micro par défaut rétabli…).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        if let Ok(mut term) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
+}
+
 /// Se termine quand la fenêtre qui a lancé le moteur ferme son entrée standard
 /// (arrêt demandé, ou fenêtre fermée / plantée).
 async fn parent_closed() {
@@ -218,7 +237,7 @@ async fn run(cli: Cli, mode: Mode) -> Result<()> {
     let watch_parent = cli.status;
     let result = tokio::select! {
         r = serve(&mode, &mut local) => r,
-        _ = tokio::signal::ctrl_c() => {
+        _ = shutdown_signal() => {
             log::info!("arrêt demandé");
             Ok(())
         }

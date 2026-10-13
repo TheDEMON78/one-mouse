@@ -54,11 +54,13 @@ Le mot de passe peut aussi passer par la variable `ONE_MOUSE_PASSWORD`. `one-mou
 - **PC principal** : cochez « Ce PC est mon PC principal » sur le PC où sont branchés la souris, le clavier et le
   casque (un seul des deux, option `--main`). L'autre PC lui envoie alors son son **en permanence**, que la souris
   soit dessus ou non.
-- **Micro** : le micro du PC principal est envoyé à l'autre PC et y devient un micro utilisable par les applications
-  (Discord, Teams…). Sous Linux, one-mouse crée lui-même le micro virtuel « Micro-one-mouse ». Sous Windows et macOS,
-  un micro virtuel demande un pilote : installez [VB-Cable](https://vb-audio.com/Cable/) (choisissez ensuite
-  « CABLE Output » comme micro) ou [BlackHole](https://existential.audio/blackhole/), détectés automatiquement.
-  Sans micro virtuel, le micro reçu n'est pas joué sur les haut-parleurs (il reviendrait en écho).
+- **Micro** : le micro du PC qui contrôle (PC principal) est envoyé à l'autre PC et y devient **automatiquement le micro
+  par défaut** pendant la connexion : Discord, Teams… l'utilisent sans réglage, et l'ancien micro est rétabli à
+  l'arrêt. Sous Linux, one-mouse crée lui-même le micro virtuel « Micro-one-mouse ». Sous Windows et macOS, un micro
+  virtuel demande un pilote gratuit : [VB-Cable](https://vb-audio.com/Cable/) ou
+  [BlackHole](https://existential.audio/blackhole/) (bouton « Installer le micro virtuel » dans l'onglet Son).
+  Le micro par défaut est basculé automatiquement sous Linux et Windows. Sans micro virtuel, le micro reçu n'est pas
+  joué sur les haut-parleurs (il reviendrait en écho).
 - Sans PC principal, le son n'est envoyé que par le PC contrôlé, et le micro que par celui qui contrôle : un seul sens
   à la fois, donc jamais d'écho.
 - Qualité : son transmis sans perte (flottants 32 bits, non compressé), rééchantillonnage par sinc fenêtré

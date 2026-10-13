@@ -61,12 +61,9 @@ mod imp {
             "$p = Start-Process -FilePath cmd -ArgumentList '/c {}' -Verb RunAs -WindowStyle Hidden -Wait -PassThru; exit $p.ExitCode",
             commands.replace('\'', "''")
         );
-        let status = Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-            .stdin(Stdio::null())
+        let status = crate::powershell::command(&script)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW)
             .status()
             .context("lancement de PowerShell impossible")?;
         if is_allowed() != Some(true) {

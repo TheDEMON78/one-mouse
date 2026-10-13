@@ -205,14 +205,28 @@ pub fn virtual_mic_output() -> Option<String> {
     if let Some(sink) = linux_virtual_mic() {
         return Some(sink);
     }
+    find_virtual_cable(&output_names())
+}
+
+/// Câble audio virtuel installé (VB-Cable, BlackHole…) parmi ces sorties.
+fn find_virtual_cable(outputs: &[String]) -> Option<String> {
     const KNOWN: [&str; 4] = ["CABLE Input", "VB-Audio", "BlackHole", "Loopback Audio"];
-    let outputs = output_names();
     KNOWN.iter().find_map(|known| {
         outputs
             .iter()
             .find(|name| name.to_lowercase().contains(&known.to_lowercase()))
             .cloned()
     })
+}
+
+/// Le pilote de micro virtuel est-il installé ? `None` sous Linux, où one-mouse
+/// crée lui-même le micro virtuel.
+pub fn virtual_mic_installed(outputs: &[String]) -> Option<bool> {
+    if cfg!(target_os = "linux") {
+        None
+    } else {
+        Some(find_virtual_cable(outputs).is_some())
+    }
 }
 
 #[cfg(target_os = "linux")]
