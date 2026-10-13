@@ -83,6 +83,10 @@ pub struct Settings {
     pub tray: bool,
     /// Installer seul les nouvelles versions.
     pub auto_update: bool,
+    /// Verrouiller les deux PC ensemble.
+    pub lock_sync: bool,
+    /// Pas de mise en veille pendant la connexion.
+    pub keep_awake: bool,
     /// Version du format, pour adapter les anciens réglages (absent = ancien format 0).
     #[serde(default)]
     pub format: u32,
@@ -112,6 +116,8 @@ impl Default for Settings {
             bluetooth: false,
             tray: true,
             auto_update: true,
+            lock_sync: true,
+            keep_awake: true,
             format: FORMAT,
         }
     }
@@ -193,6 +199,12 @@ impl Settings {
         }
         if self.bluetooth {
             args.push("--bluetooth".to_owned());
+        }
+        if !self.lock_sync {
+            args.push("--no-lock-sync".to_owned());
+        }
+        if !self.keep_awake {
+            args.push("--no-keep-awake".to_owned());
         }
         if self.sound_quality != crate::codec::Quality::Lossless {
             args.push("--sound-quality".to_owned());

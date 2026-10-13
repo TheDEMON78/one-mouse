@@ -58,6 +58,10 @@ pub struct Local {
     pub pointer_speed: f64,
     /// Fichiers à envoyer à l'autre PC (glissés sur la fenêtre).
     pub files: Option<mpsc::Receiver<std::path::PathBuf>>,
+    /// Verrouiller ce PC quand l'autre se verrouille (et inversement).
+    pub lock_sync: bool,
+    /// Pas de mise en veille tant que les deux PC sont connectés.
+    pub keep_awake: bool,
 }
 
 #[derive(Default)]
@@ -109,6 +113,11 @@ const STREAM_AUDIO_QUEUE: usize = 10;
 /// seconde, comme une souris classique) : une souris à 1 000 Hz saturerait la
 /// liaison, d'où des à-coups.
 const MOTION_FLUSH: Duration = Duration::from_millis(8);
+
+/// Fréquence de vérification du verrouillage de ce PC.
+const LOCK_CHECK: Duration = Duration::from_secs(1);
+/// Verrouillage demandé par l'autre PC : pas renvoyé pendant ce délai.
+const LOCK_ECHO: Duration = Duration::from_secs(10);
 
 /// Durée pendant laquelle un passage en sens inverse est ignoré.
 const EDGE_COOLDOWN: Duration = Duration::from_millis(300);
@@ -330,6 +339,11 @@ async fn event_loop(
     motion_flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut datagram = vec![0u8; 65_536];
     let mut defaults = audio::watch_defaults();
+    // Verrouillage commun et anti-veille pendant la connexion.
+    let power = crate::power::Power::new(local.keep_awake).await;
+    let mut was_locked = power.is_locked().await;
+    let mut locked_by_peer: Option<Instant> = None;
+    let mut lock_check = tokio::time::interval(LOCK_CHECK);
     // Un seul curseur visible : caché ici quand la souris est sur l'autre écran.
     let mut cursor = crate::cursor::CursorHider::new();
 
@@ -349,6 +363,13 @@ async fn event_loop(
                 match msg {
                     Message::UdpPort(port) => {
                         udp.peer_addr = udp.peer_ip.map(|ip| std::net::SocketAddr::new(ip, port));
+                    }
+                    Message::Lock => {
+                        if local.lock_sync && !was_locked {
+                            log::info!("l'autre PC est verrouillé : ce PC se verrouille aussi");
+                            locked_by_peer = Some(Instant::now());
+                            power.lock().await;
+                        }
                     }
                     Message::UdpOk => {
                         if !udp.send_ok {
@@ -378,6 +399,16 @@ async fn event_loop(
                 }
             }
             _ = probe.tick() => udp.probe(),
+            _ = lock_check.tick(), if local.lock_sync => {
+                let locked = power.is_locked().await;
+                // Verrouillé ici (pas à la demande de l'autre PC) : l'autre suit.
+                let from_peer = locked_by_peer.is_some_and(|at| at.elapsed() < LOCK_ECHO);
+                if locked && !was_locked && !from_peer {
+                    log::info!("ce PC est verrouillé : l'autre PC se verrouille aussi");
+                    send(out, Message::Lock).await?;
+                }
+                was_locked = locked;
+            }
             _ = motion_flush.tick(), if state.pending_motion != (0.0, 0.0) => {
                 flush_motion(&mut state, out).await?;
             }
@@ -1056,7 +1087,7 @@ async fn on_message(
         Message::BluetoothAddress(address) => {
             crate::bluetooth::remember_peer(address, &state.peer_name);
         }
-        Message::Ping | Message::Probe | Message::UdpPort(_) | Message::UdpOk => {}
+        Message::Ping | Message::Probe | Message::UdpPort(_) | Message::UdpOk | Message::Lock => {}
         Message::Hello { .. } => bail!("message Hello inattendu"),
     }
     Ok(())

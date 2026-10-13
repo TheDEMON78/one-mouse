@@ -40,6 +40,8 @@ Ce n'est **pas** du bureau à distance : aucune image n'est transmise, chaque PC
 - 🔄 **Mises à jour automatiques** : chaque nouvelle version s'installe seule, les deux PC restent à la même version.
 - 📶 **Par le réseau ou par Bluetooth** : câble ou Wi-Fi (recommandé), ou liaison Bluetooth directe entre les deux PC.
 - 🪟 **Reste dans la barre des tâches** (Windows) : fermer la fenêtre garde one-mouse près de l'horloge.
+- 🔒 **Verrouillage commun** : verrouiller un PC (Windows+L) verrouille l'autre ; aucun ne s'endort pendant la
+  connexion.
 - 🚀 **Démarrage automatique** à l'ouverture de session, partage lancé tout seul.
 - 📦 **Installateurs** générés automatiquement à chaque version.
 
@@ -185,7 +187,6 @@ le rejeu). Sans le bon mot de passe, impossible de lire les frappes clavier ou l
 
 ## Idées pour la suite
 
-- Verrouiller les deux PC en même temps (Windows+L), et empêcher la mise en veille de l'autre PC tant qu'on s'en sert.
 - Réveiller l'autre PC à distance (Wake-on-LAN) au démarrage du partage.
 
 ## Versions

@@ -1003,6 +1003,19 @@ impl App {
                     &mut s.start_sharing,
                     "Démarrer le partage à l'ouverture de one-mouse",
                 );
+                ui.checkbox(&mut s.lock_sync, "Verrouiller les deux PC ensemble")
+                    .on_hover_text(
+                        "Verrouiller un PC (Windows+L…) verrouille aussi l'autre. Chacun se \
+                         déverrouille ensuite avec son propre mot de passe.",
+                    );
+                ui.checkbox(
+                    &mut s.keep_awake,
+                    "Empêcher la mise en veille pendant la connexion",
+                )
+                .on_hover_text(
+                    "Aucun des deux PC ne s'endort tant qu'ils sont connectés : son, micro et \
+                     souris restent disponibles. L'écran peut toujours s'éteindre.",
+                );
             });
         });
         self.update_card(ui);

@@ -21,6 +21,7 @@ mod discovery;
 mod firewall;
 mod gui;
 mod network;
+mod power;
 mod powershell;
 mod protocol;
 mod session;
@@ -110,6 +111,14 @@ struct Cli {
     /// compressed (Opus, Wi-Fi faible).
     #[arg(long, value_enum, global = true, default_value = "lossless")]
     sound_quality: codec::Quality,
+
+    /// Ne pas verrouiller ce PC quand l'autre se verrouille (et inversement).
+    #[arg(long, global = true)]
+    no_lock_sync: bool,
+
+    /// Laisser ce PC se mettre en veille pendant la connexion.
+    #[arg(long, global = true)]
+    no_keep_awake: bool,
 
     /// Liaison Bluetooth : le PC qui attend publie aussi un service Bluetooth, et
     /// celui qui se connecte sans adresse trouve seul l'autre PC associé. Le son
@@ -272,6 +281,8 @@ async fn run(cli: Cli, mode: Mode) -> Result<()> {
             bluetooth: cli.bluetooth,
         },
         files: None,
+        lock_sync: !cli.no_lock_sync,
+        keep_awake: !cli.no_keep_awake,
     };
 
     let watch_parent = cli.status;
