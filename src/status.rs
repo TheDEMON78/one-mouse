@@ -101,6 +101,88 @@ pub fn emit_mic(status: MicStatus) {
     }
 }
 
+/// Chemin de la liaison établie, sur des lignes `@link <chemin>`.
+pub const LINK_PREFIX: &str = "@link ";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkStatus {
+    /// Bluetooth (direct, ou réseau personnel Bluetooth).
+    Bluetooth,
+    /// Réseau local, son en UDP.
+    Udp,
+    /// Réseau local, son par la connexion TCP (UDP pas encore vérifié, ou bloqué).
+    Tcp,
+}
+
+impl LinkStatus {
+    fn encode(self) -> &'static str {
+        match self {
+            LinkStatus::Bluetooth => "bluetooth",
+            LinkStatus::Udp => "udp",
+            LinkStatus::Tcp => "tcp",
+        }
+    }
+
+    pub fn parse(line: &str) -> Option<Self> {
+        Some(match line.strip_prefix(LINK_PREFIX)? {
+            "bluetooth" => LinkStatus::Bluetooth,
+            "udp" => LinkStatus::Udp,
+            "tcp" => LinkStatus::Tcp,
+            _ => return None,
+        })
+    }
+}
+
+/// État du Bluetooth direct avant la connexion, sur des lignes `@bt <état> <texte>`.
+pub const BT_PREFIX: &str = "@bt ";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BtStatus {
+    /// Service publié : ce PC attend en Bluetooth et est visible pour l'association.
+    Visible,
+    /// Recherche de l'autre PC parmi ces PC associés.
+    Searching(String),
+    /// Bluetooth inutilisable, ou autre PC introuvable : explication.
+    Error(String),
+}
+
+impl BtStatus {
+    fn encode(&self) -> String {
+        match self {
+            BtStatus::Visible => "visible".into(),
+            BtStatus::Searching(names) => format!("searching {names}"),
+            BtStatus::Error(msg) => format!("error {msg}"),
+        }
+    }
+
+    pub fn parse(line: &str) -> Option<Self> {
+        let rest = line.strip_prefix(BT_PREFIX)?;
+        let (kind, arg) = rest.split_once(' ').unwrap_or((rest, ""));
+        Some(match kind {
+            "visible" => BtStatus::Visible,
+            "searching" => BtStatus::Searching(arg.to_owned()),
+            "error" => BtStatus::Error(arg.to_owned()),
+            _ => return None,
+        })
+    }
+}
+
+fn emit_line(prefix: &str, text: &str) {
+    if ENABLED.load(Ordering::Relaxed) {
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{prefix}{}", text.replace('\n', " "));
+        let _ = out.flush();
+    }
+}
+
+pub fn emit_link(status: LinkStatus) {
+    emit_line(LINK_PREFIX, status.encode());
+}
+
+pub fn emit_bt(status: BtStatus) {
+    emit_line(BT_PREFIX, &status.encode());
+}
+
 pub fn enable() {
     ENABLED.store(true, Ordering::Relaxed);
 }
@@ -144,6 +226,24 @@ mod tests {
         ] {
             let line = format!("{MIC_PREFIX}{}", status.encode());
             assert_eq!(MicStatus::parse(&line), Some(status));
+        }
+    }
+
+    #[test]
+    fn link_and_bluetooth_roundtrip() {
+        for link in [LinkStatus::Bluetooth, LinkStatus::Udp, LinkStatus::Tcp] {
+            assert_eq!(
+                LinkStatus::parse(&format!("{LINK_PREFIX}{}", link.encode())),
+                Some(link)
+            );
+        }
+        for bt in [
+            BtStatus::Visible,
+            BtStatus::Searching("PC-SALON, PORTABLE".into()),
+            BtStatus::Error("Bluetooth désactivé".into()),
+        ] {
+            let line = format!("{BT_PREFIX}{}", bt.encode());
+            assert_eq!(BtStatus::parse(&line), Some(bt));
         }
     }
 }

@@ -17,7 +17,7 @@ use eframe::egui;
 use crate::audio::{self, Mode};
 use crate::codec::Quality;
 use crate::settings::{Settings, Side};
-use crate::status::{MicStatus, Status};
+use crate::status::{BtStatus, LinkStatus, MicStatus, Status};
 use crate::tray::Tray;
 use crate::{autostart, crypto, firewall, network};
 
@@ -52,6 +52,10 @@ struct Shared {
     status: Option<Status>,
     /// État du micro (envoyé, reçu…) pendant la connexion.
     mic: Option<MicStatus>,
+    /// Chemin de la liaison établie (Bluetooth, UDP, TCP).
+    link: Option<LinkStatus>,
+    /// État du Bluetooth direct avant la connexion.
+    bt: Option<BtStatus>,
     log: VecDeque<String>,
 }
 
@@ -107,10 +111,15 @@ impl Engine {
                             Status::Listening | Status::Connecting | Status::Error(_)
                         ) {
                             shared.mic = None;
+                            shared.link = None;
                         }
                         shared.status = Some(status);
                     } else if let Some(mic) = MicStatus::parse(&line) {
                         shared.mic = Some(mic);
+                    } else if let Some(link) = LinkStatus::parse(&line) {
+                        shared.link = Some(link);
+                    } else if let Some(bt) = BtStatus::parse(&line) {
+                        shared.bt = Some(bt);
                     } else {
                         shared.push_log(line);
                     }
@@ -294,6 +303,8 @@ impl App {
             let mut shared = self.shared.lock().expect("verrou");
             shared.status = None;
             shared.mic = None;
+            shared.link = None;
+            shared.bt = None;
             shared.log.clear();
         }
         match Engine::start(&self.settings, self.shared.clone(), ctx.clone()) {
@@ -459,7 +470,19 @@ impl App {
                 });
             }
             if running {
-                let mic = self.shared.lock().expect("verrou").mic.clone();
+                let (link, bt, mic) = {
+                    let shared = self.shared.lock().expect("verrou");
+                    (shared.link, shared.bt.clone(), shared.mic.clone())
+                };
+                if let Some(link) = link {
+                    ui.add_space(4.0);
+                    link_line(ui, link);
+                } else if self.settings.bluetooth
+                    && let Some(bt) = bt
+                {
+                    ui.add_space(4.0);
+                    bluetooth_line(ui, &bt);
+                }
                 if let Some(mic) = mic {
                     ui.add_space(4.0);
                     mic_line(ui, &mic);
@@ -865,6 +888,38 @@ impl App {
 }
 
 /// Ouvre une page dans le navigateur.
+/// Par où passe la liaison établie.
+fn link_line(ui: &mut egui::Ui, link: LinkStatus) {
+    let (color, text) = match link {
+        LinkStatus::Bluetooth => (
+            ACCENT,
+            "Liaison : Bluetooth — son compressé (Opus) pour tenir dans son débit",
+        ),
+        LinkStatus::Udp => (GREEN, "Liaison : réseau local — son sans perte en UDP"),
+        LinkStatus::Tcp => (
+            MUTED,
+            "Liaison : réseau local — son par TCP (si cela dure, le pare-feu bloque l'UDP)",
+        ),
+    };
+    ui.label(egui::RichText::new(text).color(color));
+}
+
+/// Où en est le Bluetooth direct avant la connexion.
+fn bluetooth_line(ui: &mut egui::Ui, bt: &BtStatus) {
+    let (color, text) = match bt {
+        BtStatus::Visible => (
+            GREEN,
+            "Bluetooth : ce PC est visible et attend l'autre PC".to_owned(),
+        ),
+        BtStatus::Searching(_) => (
+            MUTED,
+            "Bluetooth : recherche de l'autre PC parmi les PC associés…".to_owned(),
+        ),
+        BtStatus::Error(message) => (RED, format!("Bluetooth : {message}")),
+    };
+    ui.label(egui::RichText::new(text).color(color));
+}
+
 /// Ligne d'état du micro dans l'onglet Connexion.
 fn mic_line(ui: &mut egui::Ui, mic: &MicStatus) {
     let (color, text) = match mic {

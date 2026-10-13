@@ -149,6 +149,19 @@ fn paired_computers() -> Vec<(u64, String)> {
     devices
 }
 
+/// Échec de connexion à un PC associé, en clair.
+fn explain(error: &io::Error) -> String {
+    match error.raw_os_error() {
+        // WSASERVICE_NOT_FOUND : le PC répond, mais one-mouse n'y attend pas en Bluetooth.
+        Some(10108) => "one-mouse n'y attend pas en Bluetooth".into(),
+        // WSAETIMEDOUT, WSAEHOSTDOWN : PC éteint, hors de portée ou Bluetooth coupé.
+        Some(10060) | Some(10064) => "ne répond pas (éteint, trop loin ou Bluetooth coupé)".into(),
+        // WSAENETDOWN, WSAENETUNREACH : Bluetooth de ce PC coupé.
+        Some(10050) | Some(10051) => "Bluetooth de ce PC coupé".into(),
+        _ => error.to_string(),
+    }
+}
+
 fn device_name(address: u64) -> String {
     paired_computers()
         .into_iter()
@@ -273,6 +286,7 @@ pub async fn connect_paired() -> Result<(Stream, String)> {
         if devices.is_empty() {
             bail!(NO_PAIRED);
         }
+        let mut tried = Vec::new();
         for (address, name) in devices {
             let socket = Socket::new().context("Bluetooth indisponible (activé sur ce PC ?)")?;
             let mut target = sockaddr(address, SERVICE_GUID, 0);
@@ -287,9 +301,11 @@ pub async fn connect_paired() -> Result<(Stream, String)> {
             if ok {
                 return Ok((socket, name));
             }
-            log::debug!("Bluetooth : {name} : {}", io::Error::last_os_error());
+            let error = io::Error::last_os_error();
+            log::debug!("Bluetooth : {name} : {error}");
+            tried.push(format!("{name} : {}", explain(&error)));
         }
-        bail!(NOT_FOUND)
+        bail!("{NOT_FOUND} ({})", tried.join(" ; "))
     })
     .await??;
     Ok((bridge(socket, Box::new(())), name))

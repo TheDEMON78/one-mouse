@@ -47,9 +47,12 @@ struct Registered {
 }
 
 async fn register(role: &str) -> Result<Registered> {
-    let conn = zbus::Connection::system()
-        .await
-        .context("bus système D-Bus inaccessible")?;
+    let conn = zbus::Connection::system().await.map_err(|e| {
+        log::debug!("bus système D-Bus : {e}");
+        anyhow::anyhow!(
+            "service Bluetooth du système inaccessible (Bluetooth installé et démarré ?)"
+        )
+    })?;
     let (tx, rx) = mpsc::channel(4);
     conn.object_server()
         .at(PROFILE_PATH, Profile { connections: tx })
@@ -208,6 +211,7 @@ pub async fn connect_paired() -> Result<(Stream, String)> {
     if devices.is_empty() {
         bail!(NO_PAIRED);
     }
+    let mut tried = Vec::new();
     for (path, name) in devices {
         let device = zbus::Proxy::new(
             &registered.conn,
@@ -232,9 +236,12 @@ pub async fn connect_paired() -> Result<(Stream, String)> {
                     return Ok((into_stream(fd, Box::new(conn))?, name));
                 }
             }
-            Ok(Err(e)) => log::debug!("Bluetooth : {name} : {e}"),
-            Err(_) => log::debug!("Bluetooth : {name} ne répond pas"),
+            Ok(Err(e)) => {
+                log::debug!("Bluetooth : {name} : {e}");
+                tried.push(format!("{name} : {e}"));
+            }
+            Err(_) => tried.push(format!("{name} : ne répond pas")),
         }
     }
-    bail!(NOT_FOUND)
+    bail!("{NOT_FOUND} ({})", tried.join(" ; "))
 }

@@ -39,7 +39,7 @@ use crate::clipboard::ClipboardSync;
 use crate::crypto::{Psk, Role};
 use crate::session::Local;
 use crate::settings::Side;
-use crate::status::Status;
+use crate::status::{BtStatus, Status};
 
 const DEFAULT_PORT: u16 = 24850;
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
@@ -293,8 +293,14 @@ async fn serve(mode: &Mode, local: &mut Local) -> Result<()> {
             let mut bt = None;
             if local.audio.bluetooth {
                 match bluetooth::Server::start().await {
-                    Ok(server) => bt = Some(server),
-                    Err(e) => log::warn!("Bluetooth direct indisponible : {e:#}"),
+                    Ok(server) => {
+                        status::emit_bt(BtStatus::Visible);
+                        bt = Some(server);
+                    }
+                    Err(e) => {
+                        log::warn!("Bluetooth direct indisponible : {e:#}");
+                        status::emit_bt(BtStatus::Error(format!("{e:#}")));
+                    }
                 }
             }
             loop {
@@ -314,13 +320,15 @@ async fn serve(mode: &Mode, local: &mut Local) -> Result<()> {
                     }
                     Incoming::Bluetooth(Ok((stream, name))) => {
                         log::info!("connexion Bluetooth entrante de « {name} »");
-                        match session::run_on(stream, None, true, Role::Listener, local).await {
+                        match session::run_on(stream, None, true, true, Role::Listener, local).await
+                        {
                             Ok(()) => log::info!("« {name} » s'est déconnecté"),
                             Err(e) => log::warn!("connexion Bluetooth terminée : {e:#}"),
                         }
                     }
                     Incoming::Bluetooth(Err(e)) => {
                         log::warn!("Bluetooth direct arrêté : {e:#}");
+                        status::emit_bt(BtStatus::Error(format!("{e:#}")));
                         bt = None;
                     }
                 }
@@ -331,6 +339,7 @@ async fn serve(mode: &Mode, local: &mut Local) -> Result<()> {
                 anyhow::bail!("adresse de l'autre PC manquante");
             }
             log::info!("recherche de l'autre PC parmi les PC associés en Bluetooth");
+            status::emit_bt(BtStatus::Searching(String::new()));
             let mut last_error = String::new();
             loop {
                 status::emit(Status::Connecting);
@@ -338,7 +347,9 @@ async fn serve(mode: &Mode, local: &mut Local) -> Result<()> {
                     Ok((stream, name)) => {
                         last_error.clear();
                         log::info!("relié en Bluetooth à « {name} »");
-                        match session::run_on(stream, None, true, Role::Connector, local).await {
+                        match session::run_on(stream, None, true, true, Role::Connector, local)
+                            .await
+                        {
                             Ok(()) => log::info!("« {name} » s'est déconnecté"),
                             Err(e) => log::warn!("connexion Bluetooth terminée : {e:#}"),
                         }
@@ -348,6 +359,7 @@ async fn serve(mode: &Mode, local: &mut Local) -> Result<()> {
                         let message = format!("{e:#}");
                         if message != last_error {
                             log::warn!("{message}");
+                            status::emit_bt(BtStatus::Error(message.clone()));
                             last_error = message;
                         }
                     }

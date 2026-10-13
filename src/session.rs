@@ -24,7 +24,7 @@ use crate::codec::{AudioDecoder, AudioEncoder, Quality};
 use crate::crypto::{self, Psk, Role, UdpCrypto};
 use crate::default_mic;
 use crate::protocol::{AudioFormat, AudioKind, MAX_CLIPBOARD_LEN, Message, PeerInfo};
-use crate::status::{self, MicStatus, Status};
+use crate::status::{self, LinkStatus, MicStatus, Status};
 
 /// Identifiant de l'unique autre PC (la V1 gère une seule connexion).
 const PEER: u64 = 0;
@@ -80,17 +80,21 @@ struct State {
 pub async fn run(stream: TcpStream, role: Role, local: &mut Local) -> Result<()> {
     stream.set_nodelay(true)?;
     let peer_ip = stream.peer_addr()?.ip();
-    let bluetooth =
-        local.audio.bluetooth || crate::network::is_bluetooth_ip(stream.local_addr()?.ip());
-    run_on(stream, Some(peer_ip), bluetooth, role, local).await
+    // Réseau personnel Bluetooth : la connexion passe par la carte Bluetooth.
+    let via_bluetooth = crate::network::is_bluetooth_ip(stream.local_addr()?.ip());
+    let compress = local.audio.bluetooth || via_bluetooth;
+    run_on(stream, Some(peer_ip), compress, via_bluetooth, role, local).await
 }
 
 /// Session sur n'importe quel flux : connexion TCP, ou lien Bluetooth direct
-/// (`peer_ip` absent : pas d'UDP, le son passe par le flux).
+/// (`peer_ip` absent : pas d'UDP, le son passe par le flux). `bluetooth` : son
+/// compressé pour le débit du Bluetooth ; `via_bluetooth` : la liaison passe
+/// réellement par le Bluetooth (affiché dans la fenêtre).
 pub async fn run_on<S>(
     stream: S,
     peer_ip: Option<std::net::IpAddr>,
     bluetooth: bool,
+    via_bluetooth: bool,
     role: Role,
     local: &mut Local,
 ) -> Result<()>
@@ -171,7 +175,12 @@ where
     };
 
     status::emit(Status::Connected(peer.name.clone()));
-    let result = event_loop(local, peer, udp, &out_tx, &mut in_rx, link).await;
+    status::emit_link(if via_bluetooth {
+        LinkStatus::Bluetooth
+    } else {
+        LinkStatus::Tcp
+    });
+    let result = event_loop(local, peer, udp, &out_tx, &mut in_rx, link, via_bluetooth).await;
 
     // Toujours rendre le curseur et relâcher les touches, même en cas d'erreur.
     if let Some(capture) = &mut local.capture {
@@ -200,6 +209,7 @@ async fn event_loop(
     out: &mpsc::Sender<Message>,
     incoming: &mut mpsc::Receiver<Message>,
     link: (Quality, bool),
+    via_bluetooth: bool,
 ) -> Result<()> {
     let mut state = State {
         peer_name: peer.name,
@@ -238,6 +248,9 @@ async fn event_loop(
                     Message::UdpOk => {
                         if !udp.send_ok {
                             log::info!("son envoyé en UDP (paquets indépendants, pas d'attente en cas de perte)");
+                            if !via_bluetooth {
+                                status::emit_link(LinkStatus::Udp);
+                            }
                         }
                         udp.send_ok = true;
                     }

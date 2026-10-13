@@ -81,6 +81,11 @@ Linux). Choisissez **Bluetooth** dans « Liaison entre les deux PC » (onglet Co
 2. **Ensuite** : démarrez simplement le partage sur les deux PC. Celui qui se connecte cherche tout seul, parmi les PC
    associés, celui qui attend avec one-mouse, et se reconnecte automatiquement.
 
+**Savoir par où ça passe** : pendant le partage, l'onglet Connexion indique la liaison (« Bluetooth », « réseau local —
+son sans perte en UDP » ou « … par TCP »). En mode Bluetooth, avant la connexion, il affiche aussi l'étape en cours
+(ce PC visible et en attente, recherche parmi les PC associés) ou l'erreur exacte, par exemple « one-mouse n'y attend
+pas en Bluetooth » ou « ne répond pas (éteint, trop loin ou Bluetooth coupé) » pour chaque PC associé essayé.
+
 Le débit du Bluetooth (1 à 2 Mbit/s) ne permet pas le son sans perte : il est compressé automatiquement (Opus
 256 kbit/s, micro 64 kbit/s), avec un peu plus de latence et une portée d'une dizaine de mètres. Le réseau local reste
 le meilleur choix pour un son parfait.
