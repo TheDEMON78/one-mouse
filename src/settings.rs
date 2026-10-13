@@ -201,8 +201,8 @@ impl Settings {
         }
         if self.connect {
             args.push("connect".to_owned());
-            // Liaison Bluetooth : jamais d'adresse, l'autre PC est trouvé en Bluetooth.
-            if !self.bluetooth {
+            // Sans adresse (et toujours en Bluetooth) : l'autre PC est trouvé tout seul.
+            if !self.bluetooth && !self.address.trim().is_empty() {
                 args.push(self.address.trim().to_owned());
             }
         } else {

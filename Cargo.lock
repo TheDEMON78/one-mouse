@@ -2604,6 +2604,7 @@ dependencies = [
  "env_logger",
  "futures",
  "hkdf",
+ "hmac",
  "if-addrs",
  "image",
  "input-capture",

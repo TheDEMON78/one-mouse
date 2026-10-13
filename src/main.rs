@@ -16,6 +16,7 @@ mod codec;
 mod crypto;
 mod default_mic;
 mod default_output;
+mod discovery;
 mod firewall;
 mod gui;
 mod network;
@@ -142,8 +143,8 @@ enum Mode {
     /// Se connecte à l'autre PC (reconnexion automatique).
     Connect {
         /// Adresse de l'autre PC, par exemple 192.168.1.20 ou 192.168.1.20:24850.
-        /// Sans adresse, avec --bluetooth : connexion Bluetooth directe à l'autre PC
-        /// associé.
+        /// Sans adresse : l'autre PC est trouvé tout seul sur le réseau (ou en
+        /// Bluetooth avec --bluetooth).
         host: Option<String>,
     },
     /// Liste les périphériques audio (pour --sound-device, --mic-output…).
@@ -290,6 +291,13 @@ async fn serve(mode: &Mode, local: &mut Local) -> Result<()> {
                 "en attente de l'autre PC sur {bind} (autre PC à {})",
                 session::side_name(local.peer_side)
             );
+            // Annonce sur le réseau : l'autre PC le trouve sans adresse.
+            let announcer = tokio::spawn(discovery::announce(
+                local.psk.clone(),
+                local.name.clone(),
+                listener.local_addr()?.port(),
+            ));
+            let _announcer = AbortOnDrop(announcer);
             let mut bt = None;
             if local.audio.bluetooth {
                 match bluetooth::Server::start().await {
@@ -333,10 +341,45 @@ async fn serve(mode: &Mode, local: &mut Local) -> Result<()> {
                 }
             }
         }
-        Mode::Connect { host: None } => {
-            if !local.audio.bluetooth {
-                anyhow::bail!("adresse de l'autre PC manquante");
+        Mode::Connect { host: None } if !local.audio.bluetooth => {
+            log::info!("recherche de l'autre PC sur le réseau (même mot de passe)");
+            let mut last_error = String::new();
+            loop {
+                status::emit(Status::Connecting);
+                let found = discovery::find(&local.psk, DISCOVERY_TIMEOUT).await;
+                let attempt = match found {
+                    Ok((addr, name)) => {
+                        log::info!("« {name} » trouvé sur le réseau ({addr})");
+                        match TcpStream::connect(addr).await {
+                            Ok(stream) => {
+                                last_error.clear();
+                                match session::run(stream, Role::Connector, local).await {
+                                    Ok(()) => log::info!("« {name} » s'est déconnecté"),
+                                    Err(e) => {
+                                        log::warn!("connexion avec « {name} » terminée : {e:#}")
+                                    }
+                                }
+                                Ok(())
+                            }
+                            Err(e) => Err(format!(
+                                "connexion à {addr} impossible : {e}{}",
+                                connect_hint(&e)
+                            )),
+                        }
+                    }
+                    Err(e) => Err(format!("{e:#}")),
+                };
+                // Le même échec se répète à chaque essai : signalé une fois.
+                if let Err(message) = attempt
+                    && message != last_error
+                {
+                    log::warn!("{message}");
+                    last_error = message;
+                }
+                tokio::time::sleep(RECONNECT_DELAY).await;
             }
+        }
+        Mode::Connect { host: None } => {
             log::info!("recherche de l'autre PC parmi les PC associés en Bluetooth");
             status::emit_bt(BtStatus::Searching(String::new()));
             let mut last_error = String::new();
@@ -382,6 +425,18 @@ async fn serve(mode: &Mode, local: &mut Local) -> Result<()> {
                 tokio::time::sleep(RECONNECT_DELAY).await;
             }
         }
+    }
+}
+
+/// Durée d'écoute des annonces de l'autre PC à chaque essai.
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// Arrête une tâche quand il est détruit (fin de l'attente).
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 

@@ -277,14 +277,7 @@ impl App {
                 crypto::MIN_PASSWORD_LEN
             ));
         }
-        if self.settings.connect
-            && !self.settings.bluetooth
-            && self.settings.address.trim().is_empty()
-        {
-            return Err(
-                "Indiquez l'adresse de l'autre PC (affichée dans sa fenêtre one-mouse).".into(),
-            );
-        }
+
         Ok(())
     }
 
@@ -352,6 +345,8 @@ impl App {
                 "Connexion".into(),
                 if self.settings.bluetooth {
                     "Recherche de l'autre PC en Bluetooth…".into()
+                } else if self.settings.address.trim().is_empty() {
+                    "Recherche de l'autre PC sur le réseau…".into()
                 } else {
                     format!("Recherche de {}…", self.settings.address.trim())
                 },
@@ -525,10 +520,10 @@ impl App {
                     );
                 } else if s.connect {
                     ui.add_space(4.0);
-                    field(ui, "Adresse de l'autre PC", |ui| {
+                    field(ui, "Adresse de l'autre PC (facultatif)", |ui| {
                         ui.add(
                             egui::TextEdit::singleline(&mut s.address)
-                                .hint_text("192.168.1.20")
+                                .hint_text("vide : trouvé tout seul sur le réseau")
                                 .desired_width(f32::INFINITY),
                         );
                     });

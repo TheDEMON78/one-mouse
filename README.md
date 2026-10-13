@@ -34,6 +34,7 @@ Ce n'est **pas** du bureau à distance : aucune image n'est transmise, chaque PC
 - 🎙️ **Votre micro devient celui de l'autre PC** : Discord, Teams… l'utilisent sans réglage.
 - 🎯 **Vitesse de la souris réglable** sur l'autre PC, si les deux n'ont pas la même sensibilité.
 - 🔒 **Connexion chiffrée** par mot de passe (Argon2id, ChaCha20-Poly1305).
+- 🔎 **Découverte automatique** : les deux PC se trouvent seuls sur le réseau local, sans adresse à saisir.
 - 📶 **Par le réseau ou par Bluetooth** : câble ou Wi-Fi (recommandé), ou liaison Bluetooth directe entre les deux PC.
 - 🪟 **Reste dans la barre des tâches** (Windows) : fermer la fenêtre garde one-mouse près de l'horloge.
 - 🚀 **Démarrage automatique** à l'ouverture de session, partage lancé tout seul.
@@ -55,8 +56,9 @@ installez **la même version sur les deux PC** :
 
 Ouvrez **one-mouse** sur les deux PC (même réseau local) :
 
-1. Sur le premier PC, laissez « Attendre l'autre PC ». Notez l'**adresse de ce PC** affichée dans l'onglet Connexion.
-2. Sur le second PC, choisissez « Se connecter » et saisissez cette adresse.
+1. Sur le premier PC, laissez « Attendre l'autre PC ».
+2. Sur le second PC, choisissez « Se connecter ». **Aucune adresse à saisir** : il trouve tout seul, sur le réseau
+   local, le PC qui attend avec le même mot de passe (l'adresse reste possible, par exemple à travers un VPN).
 3. Sur les deux PC : saisissez le **même mot de passe** (8 caractères minimum), indiquez dans l'onglet Écrans de quel
    côté se trouve l'autre PC, puis cliquez sur **Démarrer le partage**.
 4. Sur le PC où sont branchés la souris, le clavier et le casque, cochez « Ce PC est mon PC principal » (onglet Son).
@@ -132,7 +134,8 @@ adresse.
 
 ## Pare-feu
 
-Le PC qui attend la connexion doit accepter le port TCP `24850` (et l'UDP pour le son, sinon il passe en TCP).
+Le PC qui attend la connexion doit accepter le port TCP `24850` (et l'UDP pour le son, sinon il passe en TCP). La
+découverte automatique utilise le port UDP `24851` sur le PC qui se connecte : sans lui, saisissez l'adresse.
 
 - **Windows** : cliquez sur « Autoriser one-mouse dans le pare-feu », dans l'onglet Options (une confirmation
   Windows s'affiche).
@@ -167,6 +170,11 @@ Le mot de passe peut aussi passer par la variable `ONE_MOUSE_PASSWORD`.
 La connexion est chiffrée et authentifiée par le mot de passe partagé : Argon2id pour dériver la clé, HKDF-SHA256
 pour une clé par session et par sens, et ChaCha20-Poly1305 pour chaque message (TCP comme UDP, avec protection contre
 le rejeu). Sans le bon mot de passe, impossible de lire les frappes clavier ou le son, ni d'envoyer de faux événements.
+
+## Idées pour la suite
+
+- Verrouiller les deux PC en même temps (Windows+L), et empêcher la mise en veille de l'autre PC tant qu'on s'en sert.
+- Réveiller l'autre PC à distance (Wake-on-LAN) au démarrage du partage.
 
 ## Versions
 

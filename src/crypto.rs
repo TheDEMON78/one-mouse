@@ -38,6 +38,20 @@ impl Psk {
             .map_err(|e| anyhow::anyhow!("dérivation du mot de passe impossible : {e}"))?;
         Ok(Self(key))
     }
+
+    /// Signature (HMAC-SHA256 tronqué) d'un message par la clé du mot de passe :
+    /// prouve qu'il vient d'un PC qui connaît le même mot de passe, sans le révéler.
+    pub fn sign(&self, data: &[u8]) -> [u8; 16] {
+        use hmac::Mac;
+        let mut mac =
+            <hmac::Hmac<Sha256> as Mac>::new_from_slice(&self.0).expect("clé HMAC de 32 octets");
+        mac.update(b"one-mouse/decouverte/v1");
+        mac.update(data);
+        let full = mac.finalize().into_bytes();
+        let mut tag = [0u8; 16];
+        tag.copy_from_slice(&full[..16]);
+        tag
+    }
 }
 
 /// Qui a ouvert la connexion : sert à attribuer une clé différente à chaque sens.
