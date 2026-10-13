@@ -107,8 +107,8 @@ impl AudioEncoder {
     }
 
     /// `bluetooth` : liaison Bluetooth (1 à 2 Mbit/s en tout). Le son y est
-    /// toujours compressé, à un débit qui laisse de la marge : 256 kbit/s en
-    /// stéréo et 64 kbit/s pour le micro restent transparents avec Opus.
+    /// toujours compressé, à un débit qui laisse de la marge à la souris :
+    /// 128 kbit/s en stéréo et 48 kbit/s pour le micro (très bonne qualité Opus).
     pub fn for_link(kind: AudioKind, quality: Quality, bluetooth: bool) -> Result<Self> {
         let quality = if bluetooth {
             Quality::Compressed
@@ -133,8 +133,8 @@ impl AudioEncoder {
                 let bitrate = match (kind, bluetooth) {
                     (AudioKind::Sound, false) => 510_000,
                     (AudioKind::Mic, false) => 128_000,
-                    (AudioKind::Sound, true) => 256_000,
-                    (AudioKind::Mic, true) => 64_000,
+                    (AudioKind::Sound, true) => 128_000,
+                    (AudioKind::Mic, true) => 48_000,
                 };
                 encoder.set_bitrate(Bitrate::Bits(bitrate))?;
                 encoder.set_vbr(false)?;

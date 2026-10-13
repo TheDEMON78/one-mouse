@@ -75,6 +75,48 @@ struct State {
     /// Dernier PC à avoir pris la main (`true` : ce PC). Sans PC principal coché,
     /// c'est lui qui en tient lieu : le son de l'autre lui parvient en permanence.
     we_controlled_last: Option<bool>,
+    /// En cas de côtés incohérents, c'est le réglage de ce PC qui fait foi.
+    side_authority: bool,
+    /// Dernière prise de main par l'autre PC / dernier retour du curseur ici :
+    /// un passage en sens inverse juste après est ignoré (anti-rebond).
+    entered_at: Option<Instant>,
+    returned_at: Option<Instant>,
+}
+
+/// Caractéristiques de la liaison établie.
+#[derive(Clone, Copy)]
+struct Link {
+    quality: Quality,
+    /// La liaison passe par le Bluetooth (son compressé).
+    via_bluetooth: bool,
+    /// En cas de côtés incohérents, le réglage de ce PC fait foi.
+    side_authority: bool,
+}
+
+/// Paquets de son en attente au plus sur la connexion (~100 ms en Opus).
+const STREAM_AUDIO_QUEUE: usize = 10;
+
+/// Durée pendant laquelle un passage en sens inverse est ignoré.
+const EDGE_COOLDOWN: Duration = Duration::from_millis(300);
+
+fn side_code(side: Position) -> u8 {
+    match side {
+        Position::Left => 0,
+        Position::Right => 1,
+        Position::Top => 2,
+        Position::Bottom => 3,
+    }
+}
+
+/// Côté où l'autre PC voit ce PC, à partir de son code : le côté opposé.
+fn mirrored_side(code: u8) -> Option<Position> {
+    Some(match code {
+        0 => Position::Right,
+        1 => Position::Left,
+        2 => Position::Bottom,
+        3 => Position::Top,
+        _ => return None,
+    })
 }
 
 pub async fn run(stream: TcpStream, role: Role, local: &mut Local) -> Result<()> {
@@ -129,9 +171,19 @@ where
     let link = (local.audio.quality, via_bluetooth);
 
     let (out_tx, mut out_rx) = mpsc::channel::<Message>(1024);
+    // Son passé par la connexion (UDP bloqué, Bluetooth) : file courte et moins
+    // prioritaire. Si la liaison est trop lente, le son en trop est perdu au lieu
+    // de retarder la souris et le clavier.
+    let (audio_tx, mut audio_rx) = mpsc::channel::<Message>(STREAM_AUDIO_QUEUE);
     let (in_tx, mut in_rx) = mpsc::channel::<Message>(1024);
     let write_task = tokio::spawn(async move {
-        while let Some(msg) = out_rx.recv().await {
+        loop {
+            let msg = tokio::select! {
+                biased;
+                msg = out_rx.recv() => msg,
+                Some(msg) = audio_rx.recv() => Some(msg),
+            };
+            let Some(msg) = msg else { break };
             writer.send(&msg).await?;
         }
         anyhow::Ok(())
@@ -168,6 +220,7 @@ where
     let udp = Udp {
         socket,
         crypto: udp_crypto,
+        stream_audio: audio_tx,
         peer_ip,
         peer_addr: None,
         send_ok: false,
@@ -187,7 +240,20 @@ where
     } else {
         LinkStatus::Tcp
     });
-    let result = event_loop(local, peer, udp, &out_tx, &mut in_rx, link, via_bluetooth).await;
+    // Côtés : chaque PC dit où il voit l'autre. S'ils ne sont pas opposés, le PC
+    // principal fait foi (ou, sans PC principal, celui qui s'est connecté).
+    send(&out_tx, Message::Side(side_code(local.peer_side))).await?;
+    let side_authority = if local.audio.main != peer.main {
+        local.audio.main
+    } else {
+        role == Role::Connector
+    };
+    let link = Link {
+        quality: link.0,
+        via_bluetooth,
+        side_authority,
+    };
+    let result = event_loop(local, peer, udp, &out_tx, &mut in_rx, link).await;
 
     // Toujours rendre le curseur et relâcher les touches, même en cas d'erreur.
     if let Some(capture) = &mut local.capture {
@@ -215,13 +281,19 @@ async fn event_loop(
     mut udp: Udp,
     out: &mpsc::Sender<Message>,
     incoming: &mut mpsc::Receiver<Message>,
-    link: (Quality, bool),
-    via_bluetooth: bool,
+    link: Link,
 ) -> Result<()> {
+    let Link {
+        quality,
+        via_bluetooth,
+        side_authority,
+    } = link;
+    let link = (quality, via_bluetooth);
     let mut state = State {
         peer_name: peer.name,
         peer_main: peer.main,
         pointer_speed: local.pointer_speed,
+        side_authority,
         ..State::default()
     };
     if local.audio.main && state.peer_main {
@@ -285,11 +357,11 @@ async fn event_loop(
                 audio.follow_defaults(&now, &local.audio);
             }
             frame = recv_frame(&mut audio.sound) => match frame {
-                Some(frame) => send_audio(&mut audio.sound, AudioKind::Sound, link, &frame, &mut udp, out),
+                Some(frame) => send_audio(&mut audio.sound, AudioKind::Sound, link, &frame, &mut udp),
                 None => audio.sound.capture_stopped(),
             },
             frame = recv_frame(&mut audio.mic) => match frame {
-                Some(frame) => send_audio(&mut audio.mic, AudioKind::Mic, link, &frame, &mut udp, out),
+                Some(frame) => send_audio(&mut audio.mic, AudioKind::Mic, link, &frame, &mut udp),
                 None => audio.mic.capture_stopped(),
             },
             Some(text) = recv_clipboard(&mut local.clipboard) => {
@@ -319,6 +391,8 @@ async fn recv_frame(link: &mut AudioLink) -> Option<AudioFrame> {
 struct Udp {
     socket: UdpSocket,
     crypto: UdpCrypto,
+    /// Repli : son envoyé par la connexion, dans la file moins prioritaire.
+    stream_audio: mpsc::Sender<Message>,
     /// Absente sur un lien Bluetooth direct : pas d'UDP.
     peer_ip: Option<std::net::IpAddr>,
     /// Adresse UDP de l'autre PC (son port arrive par la connexion TCP).
@@ -347,13 +421,13 @@ impl Udp {
         }
     }
 
-    fn send_audio(&mut self, out: &mpsc::Sender<Message>, msg: Message) {
+    fn send_audio(&mut self, msg: Message) {
         if self.send_ok {
             self.send_datagram(&msg);
         } else {
-            // Repli TCP (UDP bloqué par un pare-feu) ; si la connexion sature, le
+            // Repli par la connexion (UDP bloqué, Bluetooth) ; si elle sature, le
             // paquet est perdu : le son passe après la souris et le clavier.
-            let _ = out.try_send(msg);
+            let _ = self.stream_audio.try_send(msg);
         }
     }
 }
@@ -365,7 +439,6 @@ fn send_audio(
     (quality, bluetooth): (Quality, bool),
     frame: &AudioFrame,
     udp: &mut Udp,
-    out: &mpsc::Sender<Message>,
 ) {
     if link.encoder.is_none() {
         match AudioEncoder::for_link(kind, quality, bluetooth) {
@@ -390,20 +463,17 @@ fn send_audio(
                     link.last_sent.clear();
                     Vec::new()
                 };
-                udp.send_audio(
-                    out,
-                    Message::Audio {
-                        kind,
-                        seq: packet.seq,
-                        format: packet.format,
-                        rate: packet.rate,
-                        channels: packet.channels,
-                        // En UDP, chaque paquet transporte aussi le précédent : une
-                        // perte isolée est réparée exactement. Inutile en TCP (fiable).
-                        previous,
-                        data: packet.data,
-                    },
-                );
+                udp.send_audio(Message::Audio {
+                    kind,
+                    seq: packet.seq,
+                    format: packet.format,
+                    rate: packet.rate,
+                    channels: packet.channels,
+                    // En UDP, chaque paquet transporte aussi le précédent : une
+                    // perte isolée est réparée exactement. Inutile en TCP (fiable).
+                    previous,
+                    data: packet.data,
+                });
             }
         }
         Err(e) => log::debug!("compression du son : {e:#}"),
@@ -723,11 +793,19 @@ async fn on_capture(
     event: CaptureEvent,
 ) -> Result<()> {
     match event {
+        CaptureEvent::Begin if state.receiving && recent(state.entered_at) => {
+            // Bord de retour touché juste après l'arrivée : rebond, ignoré.
+            capture.release().await?;
+        }
         CaptureEvent::Begin if state.receiving => {
             // Le curseur rejoué a atteint le bord de retour : l'autre PC reprend la main.
             log::info!("retour du curseur vers l'autre PC");
             capture.release().await?;
             send(out, Message::Leave).await?;
+        }
+        CaptureEvent::Begin if recent(state.returned_at) => {
+            // Bord franchi juste après le retour du curseur : rebond, ignoré.
+            capture.release().await?;
         }
         CaptureEvent::Begin => {
             log::info!("le curseur passe sur l'autre PC");
@@ -750,6 +828,11 @@ async fn on_capture(
         }
     }
     Ok(())
+}
+
+/// L'instant est-il assez récent pour qu'un passage inverse soit un rebond ?
+fn recent(at: Option<Instant>) -> bool {
+    at.is_some_and(|at| at.elapsed() < EDGE_COOLDOWN)
 }
 
 /// Applique la vitesse choisie et n'envoie que des pixels entiers : les fractions
@@ -782,6 +865,7 @@ async fn on_message(
         Message::Enter => {
             log::info!("l'autre PC prend le contrôle de celui-ci");
             state.receiving = true;
+            state.entered_at = Some(Instant::now());
             note_controller(state, false);
             status::emit(Status::Receiving);
         }
@@ -871,6 +955,30 @@ async fn on_message(
                 }
             }
         }
+        Message::Side(code) => {
+            let Some(expected) = mirrored_side(code) else {
+                return Ok(());
+            };
+            if local.peer_side != expected {
+                if state.side_authority {
+                    log::warn!(
+                        "côtés incohérents : l'autre PC s'aligne sur ce PC (autre PC : {})",
+                        side_name(local.peer_side)
+                    );
+                } else {
+                    log::warn!(
+                        "côtés incohérents : ce PC s'aligne sur l'autre (autre PC : {}) — corrigez \
+                         « Où se trouve l'autre PC ? » dans l'onglet Écrans",
+                        side_name(expected)
+                    );
+                    local.peer_side = expected;
+                    if let Some(capture) = &mut local.capture {
+                        let _ = capture.destroy(PEER).await;
+                        capture.create(PEER, expected).await?;
+                    }
+                }
+            }
+        }
         Message::BluetoothAddress(address) => {
             crate::bluetooth::remember_peer(address, &state.peer_name);
         }
@@ -887,6 +995,7 @@ async fn stop_sending(
     out: &mpsc::Sender<Message>,
 ) -> Result<()> {
     state.sending = false;
+    state.returned_at = Some(Instant::now());
     status::emit(Status::Connected(state.peer_name.clone()));
     let pressed = capture.take_pressed_keys();
     capture.release().await?;

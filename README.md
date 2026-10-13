@@ -89,7 +89,7 @@ son sans perte en UDP » ou « … par TCP »). En mode Bluetooth, avant la conn
 pas en Bluetooth » ou « ne répond pas (éteint, trop loin ou Bluetooth coupé) » pour chaque PC associé essayé.
 
 Le débit du Bluetooth (1 à 2 Mbit/s) ne permet pas le son sans perte : il est compressé automatiquement (Opus
-256 kbit/s, micro 64 kbit/s), avec un peu plus de latence et une portée d'une dizaine de mètres. Le réseau local reste
+128 kbit/s, micro 48 kbit/s), avec un peu plus de latence et une portée d'une dizaine de mètres. Le réseau local reste
 le meilleur choix pour un son parfait.
 
 En mode Bluetooth, la connexion passe toujours par le Bluetooth (aucune adresse réseau n'est utilisée). Après une

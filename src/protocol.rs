@@ -4,7 +4,7 @@ use input_event::{Event, KeyboardEvent, PointerEvent};
 use serde::{Deserialize, Serialize};
 
 /// Version du protocole, incrémentée à chaque changement incompatible.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Taille maximale d'un texte de presse-papier synchronisé (512 Kio).
 pub const MAX_CLIPBOARD_LEN: usize = 512 * 1024;
@@ -51,6 +51,9 @@ pub enum Message {
     /// Adresse Bluetooth de l'émetteur : mémorisée pour se relier ensuite en
     /// Bluetooth sans recherche.
     BluetoothAddress(u64),
+    /// Côté où l'émetteur voit l'autre PC (0 gauche, 1 droite, 2 haut, 3 bas) :
+    /// deux réglages incohérents sont harmonisés.
+    Side(u8),
 }
 
 /// Ce que chaque PC annonce de lui-même à la connexion.

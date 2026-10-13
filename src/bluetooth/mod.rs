@@ -171,13 +171,15 @@ impl BlockingSocket for std::os::unix::net::UnixStream {
 /// connexion D-Bus qui a ouvert le socket).
 #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 fn bridge<S: BlockingSocket>(socket: S, keep_alive: Box<dyn Send>) -> Stream {
-    const CHUNK: usize = 16 * 1024;
+    // Petits tampons : au débit du Bluetooth (~100 Ko/s), chaque kilo-octet en
+    // attente est ~10 ms de retard pour la souris.
+    const CHUNK: usize = 4 * 1024;
     let socket = Arc::new(socket);
-    let (app, pipe) = tokio::io::duplex(256 * 1024);
+    let (app, pipe) = tokio::io::duplex(8 * 1024);
     let (mut pipe_read, mut pipe_write) = tokio::io::split(pipe);
 
     // Socket → session.
-    let (in_tx, mut in_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    let (in_tx, mut in_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(2);
     let reader = socket.clone();
     std::thread::spawn(move || {
         let mut buf = vec![0u8; CHUNK];
@@ -202,7 +204,7 @@ fn bridge<S: BlockingSocket>(socket: S, keep_alive: Box<dyn Send>) -> Stream {
     });
 
     // Session → socket.
-    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(2);
     tokio::spawn(async move {
         let mut buf = vec![0u8; CHUNK];
         loop {

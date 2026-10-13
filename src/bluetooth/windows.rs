@@ -7,7 +7,8 @@
 use std::io;
 use std::mem::{size_of, zeroed};
 use std::ptr::{from_mut, null_mut};
-use std::sync::Once;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Once};
 
 use anyhow::{Context, Result, bail};
 use windows_sys::Win32::Devices::Bluetooth::{
@@ -213,7 +214,12 @@ impl Registration {
 }
 
 pub struct Server {
-    socket: Socket,
+    /// Connexions acceptées par le thread d'écoute (adresse de l'appareil).
+    accepted: tokio::sync::mpsc::Receiver<(Socket, u64)>,
+    /// Arrêt demandé : le thread d'écoute s'arrête dès la fermeture du socket.
+    closing: Arc<AtomicBool>,
+    /// Socket d'écoute : sa fermeture (à la destruction) arrête le thread d'écoute.
+    _socket: Socket,
     registration: Box<Registration>,
 }
 
@@ -250,28 +256,57 @@ impl Server {
             BluetoothEnableDiscovery(null_mut(), 1);
         }
         log::info!("Bluetooth : service one-mouse publié, ce PC est visible pour l'association");
+
+        // Un seul thread d'écoute pour toute l'attente : chaque connexion acceptée
+        // est transmise, jamais perdue (une écoute par attente, abandonnée quand
+        // l'attente s'arrête, refermait les connexions qu'elle acceptait).
+        let (tx, accepted) = tokio::sync::mpsc::channel(4);
+        let closing = Arc::new(AtomicBool::new(false));
+        let raw = socket.0;
+        let stop = closing.clone();
+        std::thread::Builder::new()
+            .name("bluetooth-ecoute".into())
+            .spawn(move || {
+                loop {
+                    let mut addr = sockaddr(0, GUID::from_u128(0), 0);
+                    let mut len = size_of::<SOCKADDR_BTH>() as i32;
+                    // SAFETY : `raw` reste ouvert jusqu'à l'arrêt ; fermé, `accept` échoue.
+                    let client =
+                        unsafe { accept(raw, from_mut(&mut addr).cast::<SOCKADDR>(), &mut len) };
+                    if stop.load(Ordering::SeqCst) {
+                        if client != INVALID_SOCKET {
+                            drop(Socket(client));
+                        }
+                        break;
+                    }
+                    if client == INVALID_SOCKET {
+                        log::debug!(
+                            "Bluetooth : connexion entrante refusée : {}",
+                            io::Error::last_os_error()
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        continue;
+                    }
+                    let address = addr.btAddr;
+                    if tx.blocking_send((Socket(client), address)).is_err() {
+                        break;
+                    }
+                }
+            })?;
         Ok(Self {
-            socket,
+            accepted,
+            closing,
+            _socket: socket,
             registration,
         })
     }
 
     pub async fn accept(&mut self) -> Result<(Stream, String)> {
-        let raw = self.socket.0;
-        let (client, address) = tokio::task::spawn_blocking(move || {
-            let mut addr = sockaddr(0, GUID::from_u128(0), 0);
-            let mut len = size_of::<SOCKADDR_BTH>() as i32;
-            // SAFETY : `raw` reste ouvert tant que `Server` existe ; s'il est fermé,
-            // `accept` échoue proprement.
-            let client = unsafe { accept(raw, from_mut(&mut addr).cast::<SOCKADDR>(), &mut len) };
-            if client == INVALID_SOCKET {
-                return Err(io::Error::last_os_error());
-            }
-            let address = addr.btAddr;
-            Ok((Socket(client), address))
-        })
-        .await?
-        .context("connexion Bluetooth entrante impossible")?;
+        let (client, address) = self
+            .accepted
+            .recv()
+            .await
+            .context("service Bluetooth arrêté")?;
         let name = tokio::task::spawn_blocking(move || device_name(address)).await?;
         Ok((bridge(client, Box::new(())), name))
     }
@@ -279,6 +314,8 @@ impl Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
+        // Le thread d'écoute voit l'arrêt quand `accept` échoue (socket fermé ensuite).
+        self.closing.store(true, Ordering::SeqCst);
         let _ = self.registration.set(RNRSERVICE_DELETE);
     }
 }

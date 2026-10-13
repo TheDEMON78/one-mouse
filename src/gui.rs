@@ -1150,7 +1150,7 @@ fn bluetooth_steps(ui: &mut egui::Ui, peer: Option<&crate::bluetooth::KnownPeer>
     );
     ui.label(
         egui::RichText::new(
-            "Débit du Bluetooth limité (1 à 2 Mbit/s) : le son est compressé (Opus 256 kbit/s), \
+            "Débit du Bluetooth limité (1 à 2 Mbit/s) : le son est compressé (Opus 128 kbit/s), \
              avec un peu plus de latence, et la portée est d'une dizaine de mètres. Le réseau \
              local reste le meilleur choix pour un son parfait.",
         )
