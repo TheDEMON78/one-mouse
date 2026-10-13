@@ -30,6 +30,7 @@ mod status;
 mod transfer;
 mod tray;
 mod update;
+mod wake;
 
 use std::time::Duration;
 
@@ -119,6 +120,10 @@ struct Cli {
     /// Laisser ce PC se mettre en veille pendant la connexion.
     #[arg(long, global = true)]
     no_keep_awake: bool,
+
+    /// Ne pas réveiller l'autre PC (Wake-on-LAN) au démarrage.
+    #[arg(long, global = true)]
+    no_wake: bool,
 
     /// Liaison Bluetooth : le PC qui attend publie aussi un service Bluetooth, et
     /// celui qui se connecte sans adresse trouve seul l'autre PC associé. Le son
@@ -283,6 +288,7 @@ async fn run(cli: Cli, mode: Mode) -> Result<()> {
         files: None,
         lock_sync: !cli.no_lock_sync,
         keep_awake: !cli.no_keep_awake,
+        wake: !cli.no_wake,
     };
 
     let watch_parent = cli.status;
@@ -314,6 +320,25 @@ async fn run(cli: Cli, mode: Mode) -> Result<()> {
 }
 
 async fn serve(mode: &Mode, local: &mut Local) -> Result<()> {
+    if local.wake && !matches!(mode, Mode::AudioDevices) {
+        // L'autre PC est peut-être en veille : réveillé jusqu'à la première connexion.
+        let waker = tokio::spawn(async {
+            for attempt in 0..WAKE_ATTEMPTS {
+                if session::ever_connected() {
+                    break;
+                }
+                let _ =
+                    tokio::task::spawn_blocking(move || wake::wake_known_peer(attempt == 0)).await;
+                tokio::time::sleep(WAKE_INTERVAL).await;
+            }
+        });
+        let _waker = AbortOnDrop(waker);
+        return serve_mode(mode, local).await;
+    }
+    serve_mode(mode, local).await
+}
+
+async fn serve_mode(mode: &Mode, local: &mut Local) -> Result<()> {
     match mode {
         // Traité au démarrage, avant d'initialiser la capture.
         Mode::AudioDevices => Ok(()),
@@ -362,7 +387,8 @@ async fn serve(mode: &Mode, local: &mut Local) -> Result<()> {
                     }
                     Incoming::Bluetooth(Ok((stream, name))) => {
                         log::info!("connexion Bluetooth entrante de « {name} »");
-                        match session::run_on(stream, None, true, Role::Listener, local).await {
+                        match session::run_on(stream, None, true, None, Role::Listener, local).await
+                        {
                             Ok(()) => log::info!("« {name} » s'est déconnecté"),
                             Err(e) => log::warn!("connexion Bluetooth terminée : {e:#}"),
                         }
@@ -423,7 +449,9 @@ async fn serve(mode: &Mode, local: &mut Local) -> Result<()> {
                     Ok((stream, name)) => {
                         last_error.clear();
                         log::info!("relié en Bluetooth à « {name} »");
-                        match session::run_on(stream, None, true, Role::Connector, local).await {
+                        match session::run_on(stream, None, true, None, Role::Connector, local)
+                            .await
+                        {
                             Ok(()) => log::info!("« {name} » s'est déconnecté"),
                             Err(e) => log::warn!("connexion Bluetooth terminée : {e:#}"),
                         }
@@ -461,6 +489,10 @@ async fn serve(mode: &Mode, local: &mut Local) -> Result<()> {
         }
     }
 }
+
+/// Réveil à distance : un paquet toutes les 30 s pendant 5 minutes au plus.
+const WAKE_ATTEMPTS: u32 = 10;
+const WAKE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Durée d'écoute des annonces de l'autre PC à chaque essai.
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(4);

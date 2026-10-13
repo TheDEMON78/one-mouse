@@ -87,6 +87,8 @@ pub struct Settings {
     pub lock_sync: bool,
     /// Pas de mise en veille pendant la connexion.
     pub keep_awake: bool,
+    /// Réveiller l'autre PC au démarrage du partage.
+    pub wake: bool,
     /// Version du format, pour adapter les anciens réglages (absent = ancien format 0).
     #[serde(default)]
     pub format: u32,
@@ -118,6 +120,7 @@ impl Default for Settings {
             auto_update: true,
             lock_sync: true,
             keep_awake: true,
+            wake: true,
             format: FORMAT,
         }
     }
@@ -205,6 +208,9 @@ impl Settings {
         }
         if !self.keep_awake {
             args.push("--no-keep-awake".to_owned());
+        }
+        if !self.wake {
+            args.push("--no-wake".to_owned());
         }
         if self.sound_quality != crate::codec::Quality::Lossless {
             args.push("--sound-quality".to_owned());

@@ -62,6 +62,8 @@ pub struct Local {
     pub lock_sync: bool,
     /// Pas de mise en veille tant que les deux PC sont connectés.
     pub keep_awake: bool,
+    /// Réveiller l'autre PC (Wake-on-LAN) au démarrage, s'il ne répond pas.
+    pub wake: bool,
 }
 
 #[derive(Default)]
@@ -114,6 +116,13 @@ const STREAM_AUDIO_QUEUE: usize = 10;
 /// liaison, d'où des à-coups.
 const MOTION_FLUSH: Duration = Duration::from_millis(8);
 
+/// Une connexion a été établie depuis le démarrage (le réveil à distance s'arrête).
+static CONNECTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn ever_connected() -> bool {
+    CONNECTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Fréquence de vérification du verrouillage de ce PC.
 const LOCK_CHECK: Duration = Duration::from_secs(1);
 /// Verrouillage demandé par l'autre PC : pas renvoyé pendant ce délai.
@@ -148,8 +157,10 @@ pub async fn run(stream: TcpStream, role: Role, local: &mut Local) -> Result<()>
     // Réseau personnel Bluetooth : la connexion passe par la carte Bluetooth.
     // Sinon, même avec l'option Bluetooth cochée, c'est le réseau local : son
     // sans perte.
-    let via_bluetooth = crate::network::is_bluetooth_ip(stream.local_addr()?.ip());
-    run_on(stream, Some(peer_ip), via_bluetooth, role, local).await
+    let local_ip = stream.local_addr()?.ip();
+    let via_bluetooth = crate::network::is_bluetooth_ip(local_ip);
+    let mac = crate::wake::local_mac(local_ip);
+    run_on(stream, Some(peer_ip), via_bluetooth, mac, role, local).await
 }
 
 /// Session sur n'importe quel flux : connexion TCP, ou lien Bluetooth direct
@@ -160,6 +171,7 @@ pub async fn run_on<S>(
     stream: S,
     peer_ip: Option<std::net::IpAddr>,
     via_bluetooth: bool,
+    mac: Option<[u8; 6]>,
     role: Role,
     local: &mut Local,
 ) -> Result<()>
@@ -260,6 +272,11 @@ where
     {
         send(&out_tx, Message::BluetoothAddress(address)).await?;
     }
+    // Adresse MAC de ce PC : l'autre pourra le réveiller à distance.
+    if let Some(mac) = mac {
+        send(&out_tx, Message::WakeAddress(mac)).await?;
+    }
+    CONNECTED.store(true, std::sync::atomic::Ordering::Relaxed);
     status::emit(Status::Connected(peer.name.clone()));
     status::emit_link(if via_bluetooth {
         LinkStatus::Bluetooth
@@ -1084,6 +1101,7 @@ async fn on_message(
                 }
             }
         }
+        Message::WakeAddress(mac) => crate::wake::remember_peer(mac, &state.peer_name),
         Message::BluetoothAddress(address) => {
             crate::bluetooth::remember_peer(address, &state.peer_name);
         }

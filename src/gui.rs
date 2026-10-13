@@ -1016,7 +1016,21 @@ impl App {
                     "Aucun des deux PC ne s'endort tant qu'ils sont connectés : son, micro et \
                      souris restent disponibles. L'écran peut toujours s'éteindre.",
                 );
+                ui.checkbox(&mut s.wake, "Réveiller l'autre PC au démarrage du partage")
+                    .on_hover_text(
+                        "S'il est en veille, l'autre PC est réveillé par le réseau (Wake-on-LAN). \
+                         Sa carte réseau doit avoir le réveil activé ; il faut s'être connecté \
+                         une fois par le réseau pour connaître son adresse.",
+                    );
             });
+            if let Some(peer) = crate::wake::known_peer()
+                && ui
+                    .button(format!("Réveiller « {} » maintenant", peer.name))
+                    .clicked()
+                && crate::wake::send(peer.mac).is_err()
+            {
+                self.error = Some("Envoi du signal de réveil impossible.".into());
+            }
         });
         self.update_card(ui);
         card(ui, |ui| {

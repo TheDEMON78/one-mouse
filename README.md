@@ -42,6 +42,7 @@ Ce n'est **pas** du bureau à distance : aucune image n'est transmise, chaque PC
 - 🪟 **Reste dans la barre des tâches** (Windows) : fermer la fenêtre garde one-mouse près de l'horloge.
 - 🔒 **Verrouillage commun** : verrouiller un PC (Windows+L) verrouille l'autre ; aucun ne s'endort pendant la
   connexion.
+- ⏰ **Réveil à distance** : au démarrage du partage, l'autre PC en veille est réveillé par le réseau (Wake-on-LAN).
 - 🚀 **Démarrage automatique** à l'ouverture de session, partage lancé tout seul.
 - 📦 **Installateurs** générés automatiquement à chaque version.
 
@@ -187,7 +188,6 @@ le rejeu). Sans le bon mot de passe, impossible de lire les frappes clavier ou l
 
 ## Idées pour la suite
 
-- Réveiller l'autre PC à distance (Wake-on-LAN) au démarrage du partage.
 
 ## Versions
 

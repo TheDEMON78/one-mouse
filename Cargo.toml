@@ -47,6 +47,7 @@ hmac = "0.12"
 if-addrs = "0.15"
 image = { version = "0.25", default-features = false, features = ["png"] }
 log = "0.4"
+mac_address = "1"
 opus = "0.4.0"
 postcard = { version = "1", features = ["use-std"] }
 rand = "0.8"
