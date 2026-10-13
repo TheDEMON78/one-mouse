@@ -268,7 +268,8 @@ impl App {
                 ui.add_space(4.0);
                 ui.label(
                     egui::RichText::new(
-                        "Tous les réglages restent modifiables ensuite dans les onglets.",
+                        "Tous les réglages restent modifiables ensuite dans les onglets, et l'onglet Aide \
+                         répond aux questions courantes.",
                     )
                     .small()
                     .color(MUTED),

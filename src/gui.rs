@@ -24,6 +24,7 @@ use crate::status::{
 use crate::tray::Tray;
 use crate::{autostart, crypto, firewall, network};
 
+mod help;
 mod wizard;
 
 const ICON_PNG: &[u8] = include_bytes!("../assets/icons/256x256.png");
@@ -1598,49 +1599,6 @@ impl App {
                 }
             });
         }
-        card(ui, |ui| {
-            section_title(ui, "Raccourci de secours");
-            ui.label(
-                egui::RichText::new(
-                    "Ctrl + Maj + Alt + touche Windows / Cmd : reprendre la main à tout moment.",
-                )
-                .color(MUTED),
-            );
-        });
-    }
-
-    fn log_tab(&mut self, ui: &mut egui::Ui) {
-        card(ui, |ui| {
-            ui.horizontal(|ui| {
-                section_title(ui, "Journal");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("Copier").clicked() {
-                        let text = self
-                            .shared
-                            .lock()
-                            .expect("verrou")
-                            .log
-                            .iter()
-                            .cloned()
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        ui.ctx().copy_text(text);
-                    }
-                });
-            });
-            egui::ScrollArea::vertical()
-                .max_height(ui.available_height().max(200.0))
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    let shared = self.shared.lock().expect("verrou");
-                    if shared.log.is_empty() {
-                        ui.label(egui::RichText::new("Rien pour le moment.").color(MUTED));
-                    }
-                    for line in &shared.log {
-                        ui.label(egui::RichText::new(line).monospace().size(11.5));
-                    }
-                });
-        });
     }
 }
 
@@ -1793,7 +1751,7 @@ enum Tab {
     Sound,
     Clipboard,
     Options,
-    Log,
+    Help,
 }
 
 impl Tab {
@@ -1803,7 +1761,7 @@ impl Tab {
         Tab::Sound,
         Tab::Clipboard,
         Tab::Options,
-        Tab::Log,
+        Tab::Help,
     ];
 
     fn label(self) -> &'static str {
@@ -1813,7 +1771,7 @@ impl Tab {
             Tab::Sound => "Son et micro",
             Tab::Clipboard => "Presse-papier",
             Tab::Options => "Réglages",
-            Tab::Log => "Journal",
+            Tab::Help => "Aide",
         }
     }
 }
@@ -2461,7 +2419,7 @@ impl eframe::App for App {
                     Tab::Sound => self.sound_tab(ui, running),
                     Tab::Options => self.options_tab(ui, running),
                     Tab::Clipboard => self.clipboard_tab(ui),
-                    Tab::Log => self.log_tab(ui),
+                    Tab::Help => self.help_tab(ui),
                 });
             });
     }
