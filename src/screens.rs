@@ -133,6 +133,11 @@ pub fn warp_cursor(point: (i32, i32)) -> bool {
     imp::warp(point)
 }
 
+/// Bouton principal de la souris enfoncé (glisser-déposer en cours…).
+pub fn primary_button_down() -> bool {
+    imp::primary_button_down()
+}
+
 /// Windows : coordonnées en pixels réels de chaque écran, comme la capture.
 /// À appeler au démarrage du moteur, avant toute fenêtre.
 pub fn enable_dpi_awareness() {
@@ -201,6 +206,23 @@ mod imp {
         // SAFETY : sans pointeur.
         unsafe { SetCursorPos(point.0, point.1) != 0 }
     }
+
+    pub fn primary_button_down() -> bool {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+            GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON,
+        };
+        use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SWAPBUTTON};
+        // SAFETY : fonctions sans pointeur. Boutons inversés : le principal est
+        // le bouton physique de droite.
+        unsafe {
+            let key = if GetSystemMetrics(SM_SWAPBUTTON) != 0 {
+                VK_RBUTTON
+            } else {
+                VK_LBUTTON
+            };
+            (GetAsyncKeyState(key as i32) as u16 & 0x8000) != 0
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -265,6 +287,15 @@ mod imp {
         if wayland() {
             return None;
         }
+        pointer().map(|(x, y, _)| (x, y))
+    }
+
+    pub fn primary_button_down() -> bool {
+        !wayland() && pointer().is_some_and(|(_, _, mask)| mask & xlib::Button1Mask != 0)
+    }
+
+    /// Position du curseur et état des boutons.
+    fn pointer() -> Option<(i32, i32, c_uint)> {
         with_display(|display, root| {
             let (mut root_return, mut child) = (0, 0);
             let (mut x, mut y, mut wx, mut wy) = (0, 0, 0, 0);
@@ -283,7 +314,7 @@ mod imp {
                     &mut mask,
                 )
             };
-            (ok != 0).then_some((x, y))
+            (ok != 0).then_some((x, y, mask))
         })
         .flatten()
     }
@@ -316,6 +347,10 @@ mod imp {
     }
 
     pub fn warp(_point: (i32, i32)) -> bool {
+        false
+    }
+
+    pub fn primary_button_down() -> bool {
         false
     }
 }

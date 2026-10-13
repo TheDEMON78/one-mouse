@@ -77,6 +77,8 @@ struct X11 {
     /// Capture active : bord franchi et point de sortie du curseur.
     grabbed: Option<(Position, i32, i32)>,
     last: (i32, i32),
+    /// Glisser-déposer contre le bord déjà signalé (pas de répétition).
+    drag_reported: bool,
 }
 
 /// Les erreurs X (ex. fenêtre disparue) ne doivent pas arrêter le programme.
@@ -147,6 +149,7 @@ impl X11 {
                 positions: HashSet::new(),
                 grabbed: None,
                 last: (0, 0),
+                drag_reported: false,
             };
             x.update_size();
             x.last = x.pointer();
@@ -178,6 +181,11 @@ impl X11 {
     }
 
     fn pointer(&self) -> (i32, i32) {
+        let (x, y, _) = self.pointer_and_buttons();
+        (x, y)
+    }
+
+    fn pointer_and_buttons(&self) -> (i32, i32, c_uint) {
         // SAFETY : connexion valide, pointeurs vers des variables locales.
         unsafe {
             let (mut root, mut child) = (0, 0);
@@ -194,7 +202,7 @@ impl X11 {
                 &mut wy,
                 &mut mask,
             );
-            (x, y)
+            (x, y, mask)
         }
     }
 
@@ -354,12 +362,19 @@ impl X11 {
             Position::Top => y <= 0 && dy < 0.0,
             Position::Bottom => y >= self.height - 1 && dy > 0.0,
         });
-        if let Some(pos) = hit
-            && self.grab()
-        {
+        let Some(pos) = hit else {
+            self.drag_reported = false;
+            return;
+        };
+        if self.grab() {
             self.grabbed = Some((pos, x, y));
             let (cx, cy) = self.center();
             self.warp(cx, cy);
+            let _ = out.send((pos, CaptureEvent::Begin, Some((x, y))));
+        } else if !self.drag_reported && self.pointer_and_buttons().2 & xlib::Button1Mask != 0 {
+            // Glisser-déposer contre le bord (l'application qui glisse tient la
+            // souris) : signalé sans capture, pour proposer la zone de dépôt.
+            self.drag_reported = true;
             let _ = out.send((pos, CaptureEvent::Begin, Some((x, y))));
         }
     }

@@ -18,6 +18,7 @@ mod cursor;
 mod default_mic;
 mod default_output;
 mod discovery;
+mod dropzone;
 mod firewall;
 mod gui;
 mod history;
@@ -252,14 +253,18 @@ async fn shutdown_signal() {
 /// Lit les commandes de la fenêtre sur l'entrée standard (« @send <chemin> » :
 /// fichier à envoyer) ; se termine quand la fenêtre se ferme (fin de l'entrée).
 fn watch_parent(
-    files: tokio::sync::mpsc::Sender<std::path::PathBuf>,
+    files: tokio::sync::mpsc::Sender<transfer::Outgoing>,
 ) -> tokio::sync::oneshot::Receiver<()> {
     use std::io::BufRead;
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines().map_while(Result::ok) {
             if let Some(path) = line.strip_prefix("@send ") {
-                let _ = files.blocking_send(std::path::PathBuf::from(path));
+                let _ = files.blocking_send(transfer::Outgoing::File(path.into()));
+            } else if let Some(json) = line.strip_prefix("@drop ")
+                && let Ok(paths) = serde_json::from_str::<Vec<std::path::PathBuf>>(json)
+            {
+                let _ = files.blocking_send(transfer::Outgoing::Drop(paths));
             }
         }
         let _ = tx.send(());
@@ -304,21 +309,25 @@ async fn run(cli: Cli, mode: Mode) -> Result<()> {
             bluetooth: cli.bluetooth,
         },
         files: None,
+        drop_zone: None,
         lock_sync: !cli.no_lock_sync,
         keep_awake: !cli.no_keep_awake,
         wake: !cli.no_wake,
         clipboard_history: !cli.no_clipboard_history,
     };
 
+    // Fichiers à envoyer : glissés sur la fenêtre ou sur la zone de dépôt.
+    let (files_tx, files_rx) = tokio::sync::mpsc::channel(64);
+    local.files = Some(files_rx);
+    local.drop_zone = {
+        let files = files_tx.clone();
+        dropzone::DropZone::start(Box::new(move |paths| {
+            let _ = files.blocking_send(transfer::Outgoing::Drop(paths));
+        }))
+    };
     let watch_parent = cli.status;
     // Avec la fenêtre : commandes (fichiers à envoyer) et fin quand elle se ferme.
-    let parent_closed = if watch_parent {
-        let (files_tx, files_rx) = tokio::sync::mpsc::channel(64);
-        local.files = Some(files_rx);
-        Some(self::watch_parent(files_tx))
-    } else {
-        None
-    };
+    let parent_closed = watch_parent.then(|| self::watch_parent(files_tx.clone()));
     let result = tokio::select! {
         r = serve(&mode, &mut local) => r,
         _ = shutdown_signal() => {

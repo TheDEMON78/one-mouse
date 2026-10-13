@@ -4,7 +4,7 @@ use input_event::{Event, KeyboardEvent, PointerEvent};
 use serde::{Deserialize, Serialize};
 
 /// Version du protocole, incrémentée à chaque changement incompatible.
-pub const PROTOCOL_VERSION: u32 = 13;
+pub const PROTOCOL_VERSION: u32 = 14;
 
 /// Taille maximale d'un texte de presse-papier synchronisé (512 Kio).
 pub const MAX_CLIPBOARD_LEN: usize = 512 * 1024;
@@ -69,9 +69,13 @@ pub enum Message {
         size: u64,
         batch: Option<u32>,
     },
-    /// Lot de `count` fichiers copiés (ou une image si `image`) : une fois tous
+    /// Lot de `count` fichiers copiés, glissés ou d'une image : une fois tous
     /// reçus, ils sont mis dans le presse-papier de ce PC.
-    ClipboardBatch { batch: u32, count: u32, image: bool },
+    ClipboardBatch {
+        batch: u32,
+        count: u32,
+        kind: BatchKind,
+    },
     /// Morceau d'un fichier.
     FileChunk { id: u32, data: Vec<u8> },
     /// Fichier complet.
@@ -81,6 +85,17 @@ pub enum Message {
     /// Adresses MAC des cartes réseau de l'émetteur, pour le réveiller à
     /// distance ; `wired` : l'une d'elles est filaire.
     WakeAddresses { macs: Vec<[u8; 6]>, wired: bool },
+}
+
+/// Origine d'un lot de fichiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BatchKind {
+    /// Fichiers copiés (Ctrl+C).
+    Files,
+    /// Image copiée, envoyée en PNG.
+    Image,
+    /// Fichiers glissés jusqu'au bord de l'écran : montrés à l'arrivée.
+    Drop,
 }
 
 /// Ce que chaque PC annonce de lui-même à la connexion.

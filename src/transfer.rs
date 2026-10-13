@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 
-use crate::protocol::Message;
+use crate::protocol::{BatchKind, Message};
 use crate::status::{self, FileDirection, FileStatus};
 
 /// Taille des morceaux envoyés.
@@ -119,20 +119,58 @@ pub async fn send_path(path: PathBuf, first_id: u32, out: mpsc::Sender<Message>)
     send_files(files, first_id, None, &out).await;
 }
 
+/// Montre des fichiers reçus dans l'explorateur de fichiers (le premier
+/// sélectionné quand c'est possible), d'où ils peuvent être glissés ailleurs.
+pub fn reveal(paths: &[PathBuf]) {
+    let Some(first) = paths.first() else {
+        return;
+    };
+    #[cfg(windows)]
+    let result = {
+        use std::os::windows::process::CommandExt;
+        // Chemin entre guillemets après « /select, » : forme attendue par l'Explorateur.
+        std::process::Command::new("explorer")
+            .raw_arg(format!("/select,\"{}\"", first.display()))
+            .spawn()
+    };
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open")
+        .arg("-R")
+        .arg(first)
+        .spawn();
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let result = std::process::Command::new("xdg-open")
+        .arg(first.parent().unwrap_or(first))
+        .spawn();
+    if let Err(e) = result {
+        log::debug!("explorateur de fichiers non ouvert : {e}");
+    }
+}
+
 /// Taille maximale d'une copie de fichiers envoyée par le presse-papier : au-delà,
 /// glisser les fichiers sur la fenêtre (évite d'envoyer un énorme dossier copié
 /// par mégarde).
 const MAX_CLIPBOARD_FILES: u64 = 1 << 30;
 
-/// Envoie des fichiers copiés (ou une image, `image`) pour le presse-papier de
+/// À envoyer à l'autre PC, à la demande de la fenêtre ou de la zone de dépôt.
+#[derive(Debug)]
+pub enum Outgoing {
+    /// Fichier ou dossier glissé sur la fenêtre one-mouse.
+    File(PathBuf),
+    /// Fichiers glissés jusqu'au bord de l'écran.
+    Drop(Vec<PathBuf>),
+}
+
+/// Envoie des fichiers copiés, glissés ou une image pour le presse-papier de
 /// l'autre PC : un en-tête de lot, puis les fichiers.
 pub async fn send_clipboard(
     items: Vec<PathBuf>,
     batch: u32,
-    image: bool,
+    kind: BatchKind,
     first_id: u32,
     out: mpsc::Sender<Message>,
 ) {
+    let image = kind == BatchKind::Image;
     let expanded = items.clone();
     let files: Vec<(PathBuf, String)> = tokio::task::spawn_blocking(move || {
         expanded.iter().flat_map(|item| expand(item)).collect()
@@ -144,7 +182,7 @@ pub async fn send_clipboard(
         .filter_map(|(path, _)| std::fs::metadata(path).ok())
         .map(|m| m.len())
         .sum();
-    if total > MAX_CLIPBOARD_FILES {
+    if kind == BatchKind::Files && total > MAX_CLIPBOARD_FILES {
         log::warn!(
             "copie de {} non envoyée par le presse-papier (plus de {}) : glissez ces fichiers \
              sur la fenêtre one-mouse",
@@ -152,10 +190,17 @@ pub async fn send_clipboard(
             human_size(MAX_CLIPBOARD_FILES)
         );
     } else if !files.is_empty() {
+        if kind == BatchKind::Drop {
+            log::info!(
+                "fichiers glissés vers l'autre PC : {} élément(s), {}",
+                files.len(),
+                human_size(total)
+            );
+        }
         let header = Message::ClipboardBatch {
             batch,
             count: files.len() as u32,
-            image,
+            kind,
         };
         if out.send(header).await.is_ok() {
             send_files(files, first_id, Some(batch), &out).await;
@@ -303,7 +348,7 @@ struct Batch {
     id: u32,
     dir: PathBuf,
     remaining: u32,
-    image: bool,
+    kind: BatchKind,
     /// Éléments copiés (fichiers ou dossiers du premier niveau).
     items: std::collections::BTreeSet<PathBuf>,
 }
@@ -317,20 +362,24 @@ pub struct Incoming {
 
 impl Incoming {
     /// Un lot pour le presse-papier commence : ses fichiers vont dans un dossier
-    /// à lui, « Téléchargements/one-mouse/Presse-papier/… ».
-    pub fn start_batch(&mut self, id: u32, count: u32, image: bool) {
+    /// à lui, « Téléchargements/one-mouse/Presse-papier/… », ou directement dans
+    /// « Téléchargements/one-mouse » s'ils ont été glissés.
+    pub fn start_batch(&mut self, id: u32, count: u32, kind: BatchKind) {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or_default();
-        let dir = received_dir()
-            .join("Presse-papier")
-            .join(format!("{stamp}-{id}"));
+        let dir = match kind {
+            BatchKind::Drop => received_dir(),
+            _ => received_dir()
+                .join("Presse-papier")
+                .join(format!("{stamp}-{id}")),
+        };
         self.batch = Some(Batch {
             id,
             dir,
             remaining: count,
-            image,
+            kind,
             items: Default::default(),
         });
     }
@@ -342,13 +391,27 @@ impl Incoming {
         };
         let result = (|| -> Result<Partial> {
             let rel = sanitize(path).context("nom de fichier invalide")?;
+            let first = rel.components().next().map(|c| base.join(c));
+            // Premier niveau déjà reçu dans ce lot (fichier d'un dossier glissé) :
+            // pas de renommage, il complète ce dossier.
+            let in_batch_dir = match (&self.batch, batch, &first) {
+                (Some(current), Some(b), Some(first)) if current.id == b => {
+                    current.items.contains(first) && rel.components().count() > 1
+                }
+                _ => false,
+            };
+            let target = if in_batch_dir {
+                base.join(&rel)
+            } else {
+                free_path(base.join(&rel))
+            };
             if let (Some(current), Some(b)) = (&mut self.batch, batch)
                 && current.id == b
-                && let Some(first) = rel.components().next()
+                && let Ok(inside) = target.strip_prefix(&base)
+                && let Some(top) = inside.components().next()
             {
-                current.items.insert(current.dir.join(first));
+                current.items.insert(base.join(top));
             }
-            let target = free_path(base.join(rel));
             if let Some(parent) = target.parent() {
                 std::fs::create_dir_all(parent)?;
             }
@@ -389,8 +452,8 @@ impl Incoming {
     }
 
     /// Fichier complet. Renvoie le contenu à mettre dans le presse-papier quand
-    /// c'était le dernier fichier d'un lot.
-    pub fn end(&mut self, id: u32) -> Option<crate::clipboard::Clip> {
+    /// c'était le dernier fichier d'un lot, avec l'origine du lot.
+    pub fn end(&mut self, id: u32) -> Option<(crate::clipboard::Clip, BatchKind)> {
         let partial = self.files.remove(&id)?;
         let _ = partial.file.sync_all();
         partial.progress.done();
@@ -404,7 +467,7 @@ impl Incoming {
             return None;
         }
         let batch = self.batch.take()?;
-        if batch.image {
+        if batch.kind == BatchKind::Image {
             // Image : remise dans le presse-papier, fichier temporaire supprimé.
             let clip = std::fs::read(&partial.path)
                 .ok()
@@ -412,11 +475,19 @@ impl Incoming {
             let _ = std::fs::remove_file(&partial.path);
             let _ = std::fs::remove_dir(&batch.dir);
             log::info!("image copiée sur l'autre PC : collez-la ici avec Ctrl+V");
-            clip
+            clip.map(|clip| (clip, BatchKind::Image))
         } else {
-            log::info!("fichiers copiés sur l'autre PC : collez-les ici avec Ctrl+V");
-            Some(crate::clipboard::Clip::Files(
-                batch.items.into_iter().collect(),
+            if batch.kind == BatchKind::Drop {
+                log::info!(
+                    "fichiers glissés depuis l'autre PC : dans {}, et collables ici avec Ctrl+V",
+                    batch.dir.display()
+                );
+            } else {
+                log::info!("fichiers copiés sur l'autre PC : collez-les ici avec Ctrl+V");
+            }
+            Some((
+                crate::clipboard::Clip::Files(batch.items.into_iter().collect()),
+                batch.kind,
             ))
         }
     }

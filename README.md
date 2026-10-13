@@ -35,8 +35,10 @@ Ce n'est **pas** du bureau à distance : aucune image n'est transmise, chaque PC
 - 📋 **Presse-papier partagé** : texte, images et fichiers. Copiez sur un PC, collez sur l'autre avec Ctrl+V (les
   fichiers copiés sont transférés, 1 Go au plus par copie). **Historique** des 20 dernières copies des deux PC
   (onglet Presse-papier), effacé à la fermeture.
-- 📁 **Envoi de fichiers par glisser-déposer** : glissez des fichiers ou des dossiers sur la fenêtre one-mouse, ils
-  arrivent sur l'autre PC dans « Téléchargements/one-mouse ».
+- 📁 **Glisser-déposer d'un écran à l'autre** : glissez des fichiers jusqu'au bord de l'écran, vers l'autre PC ; une
+  zone « Déposer ici » apparaît sous le curseur. Lâchez-les dessus : ils arrivent sur l'autre PC dans
+  « Téléchargements/one-mouse », s'y affichent dans l'explorateur (d'où on continue à les glisser où l'on veut) et
+  sont dans son presse-papier (Ctrl+V). On peut aussi les glisser sur la fenêtre one-mouse.
 - 🔊 **Son de l'autre PC dans votre casque, en permanence**, sans perte (flottants 32 bits), en UDP chiffré.
 - 🎙️ **Votre micro devient celui de l'autre PC** : Discord, Teams… l'utilisent sans réglage.
 - 🎯 **Vitesse de la souris réglable** sur l'autre PC, si les deux n'ont pas la même sensibilité.

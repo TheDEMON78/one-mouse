@@ -23,7 +23,7 @@ use crate::clipboard::ClipboardSync;
 use crate::codec::{AudioDecoder, AudioEncoder, Quality};
 use crate::crypto::{self, Psk, Role, UdpCrypto};
 use crate::default_mic;
-use crate::protocol::{AudioFormat, AudioKind, MAX_CLIPBOARD_LEN, Message, PeerInfo};
+use crate::protocol::{AudioFormat, AudioKind, BatchKind, MAX_CLIPBOARD_LEN, Message, PeerInfo};
 use crate::status::{self, LinkStatus, MicStatus, Status};
 
 /// Identifiant de l'unique autre PC (la V1 gère une seule connexion).
@@ -59,8 +59,12 @@ pub struct Local {
     pub audio: AudioConfig,
     /// Multiplicateur des mouvements de souris envoyés à l'autre PC.
     pub pointer_speed: f64,
-    /// Fichiers à envoyer à l'autre PC (glissés sur la fenêtre).
-    pub files: Option<mpsc::Receiver<std::path::PathBuf>>,
+    /// Fichiers à envoyer à l'autre PC (glissés sur la fenêtre ou sur la zone
+    /// de dépôt).
+    pub files: Option<mpsc::Receiver<crate::transfer::Outgoing>>,
+    /// Zone de dépôt native au bord de l'écran (Windows) ; sinon la fenêtre
+    /// one-mouse l'affiche.
+    pub drop_zone: Option<crate::dropzone::DropZone>,
     /// Verrouiller ce PC quand l'autre se verrouille (et inversement).
     pub lock_sync: bool,
     /// Pas de mise en veille tant que les deux PC sont connectés.
@@ -77,6 +81,8 @@ struct State {
     peer_name: String,
     /// Écrans de l'autre PC.
     peer_monitors: Vec<crate::screens::Monitor>,
+    /// Dernier affichage de la zone de dépôt.
+    drag_edge_at: Option<Instant>,
     /// L'autre PC est le PC principal (souris, clavier, casque).
     peer_main: bool,
     /// Nos entrées sont capturées et envoyées à l'autre PC.
@@ -134,6 +140,10 @@ pub fn ever_connected() -> bool {
 const LOCK_CHECK: Duration = Duration::from_secs(1);
 /// Verrouillage demandé par l'autre PC : pas renvoyé pendant ce délai.
 const LOCK_ECHO: Duration = Duration::from_secs(10);
+
+/// Zone de dépôt : pas réaffichée plus souvent (le bord est touché à chaque
+/// mouvement tant qu'on pousse contre lui).
+const DRAG_EDGE_REPEAT: Duration = Duration::from_millis(300);
 
 /// Durée pendant laquelle un passage en sens inverse est ignoré.
 const EDGE_COOLDOWN: Duration = Duration::from_millis(300);
@@ -390,7 +400,8 @@ async fn event_loop(
                 let (_, event) = event?;
                 let side = local.peer_side;
                 let capture = local.capture.as_mut().expect("événement sans capture");
-                on_capture(capture, &mut state, out, side, event).await?;
+                let zone = local.drop_zone.as_ref();
+                on_capture(capture, &mut state, out, side, zone, event).await?;
             }
             msg = incoming.recv() => {
                 // `None` : la tâche de lecture s'est arrêtée (déconnexion).
@@ -459,11 +470,24 @@ async fn event_loop(
                 Some(frame) => send_audio(&mut audio.mic, AudioKind::Mic, link, &frame, &mut udp),
                 None => audio.mic.capture_stopped(),
             },
-            Some(path) = recv_path(&mut local.files) => {
+            Some(outgoing) = recv_path(&mut local.files) => {
                 // Identifiants espacés : chaque fichier d'un dossier a le sien.
                 let id = next_file_id;
                 next_file_id = next_file_id.wrapping_add(1 << 16);
-                tokio::spawn(crate::transfer::send_path(path, id, files_out.clone()));
+                match outgoing {
+                    crate::transfer::Outgoing::File(path) => {
+                        tokio::spawn(crate::transfer::send_path(path, id, files_out.clone()));
+                    }
+                    crate::transfer::Outgoing::Drop(paths) => {
+                        tokio::spawn(crate::transfer::send_clipboard(
+                            paths,
+                            id,
+                            BatchKind::Drop,
+                            id,
+                            files_out.clone(),
+                        ));
+                    }
+                }
             }
             Some(clip) = recv_clipboard(&mut local.clipboard) => {
                 if local.clipboard_history {
@@ -879,8 +903,8 @@ fn audio_directions(config: &AudioConfig, state: &State) -> (bool, bool) {
 }
 
 async fn recv_path(
-    files: &mut Option<mpsc::Receiver<std::path::PathBuf>>,
-) -> Option<std::path::PathBuf> {
+    files: &mut Option<mpsc::Receiver<crate::transfer::Outgoing>>,
+) -> Option<crate::transfer::Outgoing> {
     match files {
         Some(files) => files.recv().await,
         None => std::future::pending().await,
@@ -910,7 +934,11 @@ async fn send_clip(
         Clip::Files(items) => {
             log::info!("fichiers copiés : envoi au presse-papier de l'autre PC");
             tokio::spawn(crate::transfer::send_clipboard(
-                items, batch, false, batch, files,
+                items,
+                batch,
+                BatchKind::Files,
+                batch,
+                files,
             ));
         }
         Clip::Image {
@@ -932,8 +960,14 @@ async fn send_clip(
                 match png {
                     Ok(Ok(path)) => {
                         log::info!("image copiée : envoi au presse-papier de l'autre PC");
-                        crate::transfer::send_clipboard(vec![path], batch, true, batch, files)
-                            .await;
+                        crate::transfer::send_clipboard(
+                            vec![path],
+                            batch,
+                            BatchKind::Image,
+                            batch,
+                            files,
+                        )
+                        .await;
                     }
                     Ok(Err(e)) => log::warn!("image du presse-papier non envoyée : {e:#}"),
                     Err(e) => log::warn!("image du presse-papier non envoyée : {e}"),
@@ -962,9 +996,31 @@ async fn on_capture(
     state: &mut State,
     out: &mpsc::Sender<Message>,
     side: Position,
+    drop_zone: Option<&crate::dropzone::DropZone>,
     event: CaptureEvent,
 ) -> Result<()> {
     match event {
+        CaptureEvent::Begin if crate::screens::primary_button_down() => {
+            // Bouton enfoncé contre le bord : glisser-déposer en cours. Le
+            // curseur reste ici et une zone « Déposer ici » apparaît sous lui.
+            capture.release().await?;
+            if !state
+                .drag_edge_at
+                .is_some_and(|at| at.elapsed() < DRAG_EDGE_REPEAT)
+                && let Some(point) = capture.exit_point()
+            {
+                state.drag_edge_at = Some(Instant::now());
+                match drop_zone {
+                    Some(zone) => zone.show(point, side_code(side), &state.peer_name),
+                    None => status::emit_drag_edge(&status::DragEdge {
+                        x: point.0,
+                        y: point.1,
+                        side: side_code(side),
+                        peer: state.peer_name.clone(),
+                    }),
+                }
+            }
+        }
         CaptureEvent::Begin if state.receiving && recent(state.entered_at) => {
             // Bord de retour touché juste après l'arrivée : rebond, ignoré.
             capture.release().await?;
@@ -1195,11 +1251,9 @@ async fn on_message(
                 }
             }
         }
-        Message::ClipboardBatch {
-            batch,
-            count,
-            image,
-        } => state.incoming.start_batch(batch, count, image),
+        Message::ClipboardBatch { batch, count, kind } => {
+            state.incoming.start_batch(batch, count, kind)
+        }
         Message::FileStart {
             id,
             path,
@@ -1208,13 +1262,19 @@ async fn on_message(
         } => state.incoming.start(id, &path, size, batch),
         Message::FileChunk { id, data } => state.incoming.chunk(id, &data),
         Message::FileEnd { id } => {
-            if let Some(clip) = state.incoming.end(id)
-                && let Some(clipboard) = &local.clipboard
-            {
-                if local.clipboard_history {
-                    record_history(state.peer_name.clone(), clip.clone());
+            if let Some((clip, kind)) = state.incoming.end(id) {
+                // Fichiers glissés : montrés dans l'explorateur, d'où on continue
+                // à les glisser où l'on veut.
+                if let (BatchKind::Drop, crate::clipboard::Clip::Files(paths)) = (kind, &clip) {
+                    let paths = paths.clone();
+                    tokio::task::spawn_blocking(move || crate::transfer::reveal(&paths));
                 }
-                clipboard.set(clip);
+                if let Some(clipboard) = &local.clipboard {
+                    if local.clipboard_history {
+                        record_history(state.peer_name.clone(), clip.clone());
+                    }
+                    clipboard.set(clip);
+                }
             }
         }
         Message::Layout { side, offset } => {

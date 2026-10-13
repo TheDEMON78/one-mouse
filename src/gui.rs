@@ -19,7 +19,7 @@ use crate::codec::Quality;
 use crate::screens::Monitor;
 use crate::settings::{Settings, Side};
 use crate::status::{
-    BtStatus, FileDirection, FileStatus, LinkStatus, MicStatus, ScreensStatus, Status,
+    BtStatus, DragEdge, FileDirection, FileStatus, LinkStatus, MicStatus, ScreensStatus, Status,
 };
 use crate::tray::Tray;
 use crate::{autostart, crypto, firewall, network};
@@ -66,6 +66,8 @@ struct Shared {
     files: VecDeque<FileStatus>,
     /// Écrans des deux PC annoncés par le moteur, pas encore enregistrés.
     screens: Option<ScreensStatus>,
+    /// Fichiers glissés contre le bord : zone de dépôt à afficher.
+    drag_edge: Option<(DragEdge, Instant)>,
     log: VecDeque<String>,
 }
 
@@ -128,6 +130,8 @@ impl Engine {
                         shared.mic = Some(mic);
                     } else if let Some(link) = LinkStatus::parse(&line) {
                         shared.link = Some(link);
+                    } else if let Some(edge) = DragEdge::parse(&line) {
+                        shared.drag_edge = Some((edge, Instant::now()));
                     } else if let Some(screens) = ScreensStatus::parse(&line) {
                         shared.screens = Some(screens);
                     } else if let Some(bt) = BtStatus::parse(&line) {
@@ -168,6 +172,15 @@ impl Engine {
         use std::io::Write;
         let stdin = self.stdin.as_mut().context("moteur arrêté")?;
         writeln!(stdin, "@send {}", path.display())?;
+        stdin.flush()?;
+        Ok(())
+    }
+
+    /// Fichiers lâchés sur la zone de dépôt : envoyés comme un lot glissé.
+    fn send_drop(&mut self, paths: &[std::path::PathBuf]) -> Result<()> {
+        use std::io::Write;
+        let stdin = self.stdin.as_mut().context("moteur arrêté")?;
+        writeln!(stdin, "@drop {}", serde_json::to_string(paths)?)?;
         stdin.flush()?;
         Ok(())
     }
@@ -248,6 +261,8 @@ struct App {
     error: Option<String>,
     /// Message de réussite d'une action (effacé par la suivante).
     notice: Option<String>,
+    /// Des fichiers survolent la zone de dépôt.
+    drop_zone_hovered: bool,
     logo: egui::TextureHandle,
     tab: Tab,
     /// Icône de la zone de notification (Windows).
@@ -298,6 +313,7 @@ impl App {
             bluetooth_checked: Instant::now(),
             error: None,
             notice: None,
+            drop_zone_hovered: false,
             logo,
             tab: Tab::Connection,
             tray: Tray::new(cc, ICON_PNG),
@@ -1087,6 +1103,95 @@ impl App {
 
     /// Installe une mise à jour prête : seule (option) quand la souris ne contrôle
     /// aucun PC, ou à la demande. one-mouse se ferme, l'installateur le relance.
+    /// Zone « Déposer ici » contre le bord de l'écran, quand des fichiers y sont
+    /// glissés (le moteur Windows a la sienne). Elle disparaît après le dépôt, ou
+    /// peu après si rien n'est glissé dessus.
+    fn show_drop_zone(&mut self, ctx: &egui::Context) {
+        let Some((edge, at)) = self.shared.lock().expect("verrou").drag_edge.clone() else {
+            return;
+        };
+        if at.elapsed() > Duration::from_secs(3) && !self.drop_zone_hovered {
+            self.shared.lock().expect("verrou").drag_edge = None;
+            self.drop_zone_hovered = false;
+            return;
+        }
+        // Position du moteur en pixels de l'écran ; la fenêtre se place en points.
+        let ppp = ctx.native_pixels_per_point().unwrap_or(1.0).max(0.5);
+        let size = (
+            (crate::dropzone::WIDTH as f32 * ppp) as i32,
+            (crate::dropzone::HEIGHT as f32 * ppp) as i32,
+        );
+        let (x, y, _, _) = crate::dropzone::zone_rect(
+            (edge.x, edge.y),
+            edge.side,
+            size,
+            (i32::MIN / 2, i32::MIN / 2, i32::MAX / 2, i32::MAX / 2),
+        );
+        let builder = egui::ViewportBuilder::default()
+            .with_title("one-mouse")
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_taskbar(false)
+            .with_active(false)
+            .with_always_on_top()
+            .with_position(egui::pos2(x as f32 / ppp, y as f32 / ppp))
+            .with_inner_size(egui::vec2(
+                crate::dropzone::WIDTH as f32,
+                crate::dropzone::HEIGHT as f32,
+            ));
+        let (dropped, hovered) = ctx.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("zone-depot"),
+            builder,
+            |ui, _| {
+                let input = ui.ctx().input(|i| {
+                    (
+                        i.raw
+                            .dropped_files
+                            .iter()
+                            .map(|f| f.path().to_path_buf())
+                            .filter(|p| !p.as_os_str().is_empty())
+                            .collect::<Vec<_>>(),
+                        !i.raw.hovered_files.is_empty(),
+                    )
+                });
+                let stroke = if input.1 { GREEN } else { ACCENT };
+                egui::CentralPanel::default()
+                    .frame(
+                        egui::Frame::new()
+                            .fill(SURFACE)
+                            .stroke(egui::Stroke::new(3.0, stroke))
+                            .inner_margin(12),
+                    )
+                    .show(ui, |ui| {
+                        ui.centered_and_justified(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Déposer ici\npour envoyer à « {} »",
+                                    edge.peer
+                                ))
+                                .size(17.0)
+                                .strong()
+                                .color(TEXT),
+                            );
+                        });
+                    });
+                input
+            },
+        );
+        self.drop_zone_hovered = hovered;
+        ctx.request_repaint_after(Duration::from_millis(200));
+        if dropped.is_empty() {
+            return;
+        }
+        self.shared.lock().expect("verrou").drag_edge = None;
+        self.drop_zone_hovered = false;
+        if let Some(engine) = self.engine.as_mut()
+            && let Err(e) = engine.send_drop(&dropped)
+        {
+            self.error = Some(format!("Envoi des fichiers impossible : {e:#}"));
+        }
+    }
+
     /// Enregistre les écrans de l'autre PC et l'alignement retenu par le moteur
     /// (après harmonisation avec l'autre PC).
     fn handle_screens(&mut self) {
@@ -2079,6 +2184,7 @@ impl eframe::App for App {
         self.handle_update(&ctx);
         self.handle_dropped_files(&ctx);
         self.handle_screens();
+        self.show_drop_zone(&ctx);
         let running = self.running();
         if running {
             // L'état change sans action de l'utilisateur : rafraîchissement régulier.

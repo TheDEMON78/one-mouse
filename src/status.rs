@@ -254,6 +254,32 @@ pub fn emit_screens(status: &ScreensStatus) {
     }
 }
 
+/// Fichiers glissés contre le bord de l'écran, sur des lignes `@dragedge <json>` :
+/// la fenêtre affiche la zone de dépôt (quand le moteur n'en a pas).
+pub const DRAG_EDGE_PREFIX: &str = "@dragedge ";
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DragEdge {
+    /// Point du bord touché (pixels de l'écran).
+    pub x: i32,
+    pub y: i32,
+    /// Bord (0 gauche, 1 droite, 2 haut, 3 bas).
+    pub side: u8,
+    pub peer: String,
+}
+
+impl DragEdge {
+    pub fn parse(line: &str) -> Option<Self> {
+        serde_json::from_str(line.strip_prefix(DRAG_EDGE_PREFIX)?).ok()
+    }
+}
+
+pub fn emit_drag_edge(edge: &DragEdge) {
+    if let Ok(json) = serde_json::to_string(edge) {
+        emit_line(DRAG_EDGE_PREFIX, &json);
+    }
+}
+
 fn emit_line(prefix: &str, text: &str) {
     if ENABLED.load(Ordering::Relaxed) {
         let mut out = std::io::stdout().lock();
