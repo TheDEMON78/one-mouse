@@ -30,6 +30,8 @@ Ce n'est **pas** du bureau à distance : aucune image n'est transmise, chaque PC
 - 🖱️ **Souris et clavier partagés** : le curseur franchit le bord de l'écran, dans les deux sens, entre Windows, Linux
   et macOS (n'importe quelle combinaison). **Un seul curseur visible** : celui du PC utilisé (Windows, Linux X11).
 - 📋 **Presse-papier partagé** (texte) : copiez sur un PC, collez sur l'autre.
+- 📁 **Envoi de fichiers par glisser-déposer** : glissez des fichiers ou des dossiers sur la fenêtre one-mouse, ils
+  arrivent sur l'autre PC dans « Téléchargements/one-mouse ».
 - 🔊 **Son de l'autre PC dans votre casque, en permanence**, sans perte (flottants 32 bits), en UDP chiffré.
 - 🎙️ **Votre micro devient celui de l'autre PC** : Discord, Teams… l'utilisent sans réglage.
 - 🎯 **Vitesse de la souris réglable** sur l'autre PC, si les deux n'ont pas la même sensibilité.

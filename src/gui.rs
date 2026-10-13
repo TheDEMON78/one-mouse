@@ -17,12 +17,14 @@ use eframe::egui;
 use crate::audio::{self, Mode};
 use crate::codec::Quality;
 use crate::settings::{Settings, Side};
-use crate::status::{BtStatus, LinkStatus, MicStatus, Status};
+use crate::status::{BtStatus, FileDirection, FileStatus, LinkStatus, MicStatus, Status};
 use crate::tray::Tray;
 use crate::{autostart, crypto, firewall, network};
 
 const ICON_PNG: &[u8] = include_bytes!("../assets/icons/256x256.png");
 const MAX_LOG_LINES: usize = 300;
+/// Transferts de fichiers affichés.
+const MAX_FILES_SHOWN: usize = 6;
 
 /// `hidden` : démarre réduit dans la zone de notification (lancement automatique).
 pub fn run(hidden: bool) -> Result<()> {
@@ -35,7 +37,8 @@ pub fn run(hidden: bool) -> Result<()> {
             .with_title("one-mouse")
             .with_icon(icon)
             .with_inner_size([520.0, 680.0])
-            .with_min_inner_size([400.0, 480.0]),
+            .with_min_inner_size([400.0, 480.0])
+            .with_drag_and_drop(true),
         ..Default::default()
     };
     eframe::run_native(
@@ -56,6 +59,8 @@ struct Shared {
     link: Option<LinkStatus>,
     /// État du Bluetooth direct avant la connexion.
     bt: Option<BtStatus>,
+    /// Derniers fichiers envoyés ou reçus (le plus récent en dernier).
+    files: VecDeque<FileStatus>,
     log: VecDeque<String>,
 }
 
@@ -120,6 +125,19 @@ impl Engine {
                         shared.link = Some(link);
                     } else if let Some(bt) = BtStatus::parse(&line) {
                         shared.bt = Some(bt);
+                    } else if let Some(file) = FileStatus::parse(&line) {
+                        // Mise à jour du transfert en cours, sinon nouveau transfert.
+                        match shared.files.iter_mut().find(|f| {
+                            f.direction == file.direction && f.name == file.name && f.percent < 100
+                        }) {
+                            Some(existing) => *existing = file,
+                            None => {
+                                if shared.files.len() == MAX_FILES_SHOWN {
+                                    shared.files.pop_front();
+                                }
+                                shared.files.push_back(file);
+                            }
+                        }
                     } else {
                         shared.push_log(line);
                     }
@@ -136,6 +154,15 @@ impl Engine {
 
         let stdin = child.stdin.take();
         Ok(Self { child, stdin })
+    }
+
+    /// Demande au moteur d'envoyer ce fichier (ou dossier) à l'autre PC.
+    fn send_file(&mut self, path: &std::path::Path) -> Result<()> {
+        use std::io::Write;
+        let stdin = self.stdin.as_mut().context("moteur arrêté")?;
+        writeln!(stdin, "@send {}", path.display())?;
+        stdin.flush()?;
+        Ok(())
     }
 
     /// `true` tant que le processus tourne.
@@ -430,6 +457,81 @@ impl App {
                 if ui.add(button).clicked() {
                     self.tab = tab;
                 }
+            }
+        });
+    }
+
+    /// Fichiers glissés sur la fenêtre : envoyés à l'autre PC.
+    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        let dropped: Vec<std::path::PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .collect()
+        });
+        if dropped.is_empty() {
+            return;
+        }
+        let connected = matches!(
+            self.shared.lock().expect("verrou").status,
+            Some(Status::Connected(_) | Status::Sending | Status::Receiving)
+        );
+        let Some(engine) = self.engine.as_mut().filter(|_| connected) else {
+            self.error = Some(
+                "Pour envoyer des fichiers, démarrez le partage et attendez d'être connecté à \
+                 l'autre PC."
+                    .into(),
+            );
+            return;
+        };
+        for path in dropped {
+            if let Err(e) = engine.send_file(&path) {
+                self.error = Some(format!("Envoi de {} impossible : {e:#}", path.display()));
+            }
+        }
+        self.tab = Tab::Connection;
+    }
+
+    /// Carte « Fichiers » : envois et réceptions récents.
+    fn files_card(&mut self, ui: &mut egui::Ui) {
+        let files = self.shared.lock().expect("verrou").files.clone();
+        card(ui, |ui| {
+            section_title(ui, "Fichiers");
+            ui.label(
+                egui::RichText::new(
+                    "Glissez des fichiers ou des dossiers sur cette fenêtre pour les copier sur \
+                     l'autre PC (rangés dans Téléchargements/one-mouse).",
+                )
+                .color(MUTED),
+            );
+            for file in files.iter().rev() {
+                let arrow = match file.direction {
+                    FileDirection::Sending => "Envoi",
+                    FileDirection::Receiving => "Réception",
+                };
+                let name = std::path::Path::new(&file.name)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| file.name.clone());
+                if file.failed {
+                    ui.label(egui::RichText::new(format!("{arrow} échoué : {name}")).color(RED));
+                } else if file.percent >= 100 {
+                    ui.label(egui::RichText::new(format!("{arrow} terminé : {name}")).color(GREEN));
+                } else {
+                    ui.add(
+                        egui::ProgressBar::new(f32::from(file.percent) / 100.0)
+                            .text(format!("{arrow} : {name} ({} %)", file.percent)),
+                    );
+                }
+            }
+            if ui
+                .small_button("Ouvrir le dossier des fichiers reçus")
+                .clicked()
+            {
+                let dir = crate::transfer::received_dir();
+                let _ = std::fs::create_dir_all(&dir);
+                open_url(&dir.display().to_string());
             }
         });
     }
@@ -1464,6 +1566,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.handle_tray(&ctx);
         self.handle_update(&ctx);
+        self.handle_dropped_files(&ctx);
         let running = self.running();
         if running {
             // L'état change sans action de l'utilisateur : rafraîchissement régulier.
@@ -1529,8 +1632,26 @@ impl eframe::App for App {
                     .inner_margin(egui::Margin::symmetric(16, 12)),
             )
             .show(ui, |ui| {
+                // Fichiers survolés : invitation à les lâcher.
+                if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
+                    let rect = ui.max_rect();
+                    ui.painter()
+                        .rect_filled(rect, 12.0, ACCENT.gamma_multiply(0.25));
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "Lâchez pour envoyer à l'autre PC",
+                        egui::FontId::proportional(20.0),
+                        TEXT,
+                    );
+                }
                 egui::ScrollArea::vertical().show(ui, |ui| match self.tab {
-                    Tab::Connection => self.connection_tab(ui, running),
+                    Tab::Connection => {
+                        self.connection_tab(ui, running);
+                        if running {
+                            self.files_card(ui);
+                        }
+                    }
                     Tab::Screens => self.screens_tab(ui, running),
                     Tab::Sound => self.sound_tab(ui, running),
                     Tab::Options => self.options_tab(ui, running),

@@ -56,6 +56,8 @@ pub struct Local {
     pub audio: AudioConfig,
     /// Multiplicateur des mouvements de souris envoyés à l'autre PC.
     pub pointer_speed: f64,
+    /// Fichiers à envoyer à l'autre PC (glissés sur la fenêtre).
+    pub files: Option<mpsc::Receiver<std::path::PathBuf>>,
 }
 
 #[derive(Default)]
@@ -77,6 +79,8 @@ struct State {
     we_controlled_last: Option<bool>,
     /// En cas de côtés incohérents, c'est le réglage de ce PC qui fait foi.
     side_authority: bool,
+    /// Fichiers en cours de réception.
+    incoming: crate::transfer::Incoming,
     /// Dernière prise de main par l'autre PC / dernier retour du curseur ici :
     /// un passage en sens inverse juste après est ignoré (anti-rebond).
     entered_at: Option<Instant>,
@@ -84,8 +88,9 @@ struct State {
 }
 
 /// Caractéristiques de la liaison établie.
-#[derive(Clone, Copy)]
 struct Link {
+    /// File des fichiers envoyés.
+    files: mpsc::Sender<Message>,
     quality: Quality,
     /// La liaison passe par le Bluetooth (son compressé).
     via_bluetooth: bool,
@@ -175,6 +180,8 @@ where
     // prioritaire. Si la liaison est trop lente, le son en trop est perdu au lieu
     // de retarder la souris et le clavier.
     let (audio_tx, mut audio_rx) = mpsc::channel::<Message>(STREAM_AUDIO_QUEUE);
+    // Fichiers : file la moins prioritaire ; l'envoi attend qu'elle se vide.
+    let (files_tx, mut files_rx) = mpsc::channel::<Message>(4);
     let (in_tx, mut in_rx) = mpsc::channel::<Message>(1024);
     let write_task = tokio::spawn(async move {
         loop {
@@ -182,6 +189,7 @@ where
                 biased;
                 msg = out_rx.recv() => msg,
                 Some(msg) = audio_rx.recv() => Some(msg),
+                Some(msg) = files_rx.recv() => Some(msg),
             };
             let Some(msg) = msg else { break };
             writer.send(&msg).await?;
@@ -252,6 +260,7 @@ where
         quality: link.0,
         via_bluetooth,
         side_authority,
+        files: files_tx,
     };
     let result = event_loop(local, peer, udp, &out_tx, &mut in_rx, link).await;
 
@@ -287,7 +296,9 @@ async fn event_loop(
         quality,
         via_bluetooth,
         side_authority,
+        files: files_out,
     } = link;
+    let mut next_file_id: u32 = 0;
     let link = (quality, via_bluetooth);
     let mut state = State {
         peer_name: peer.name,
@@ -367,6 +378,12 @@ async fn event_loop(
                 Some(frame) => send_audio(&mut audio.mic, AudioKind::Mic, link, &frame, &mut udp),
                 None => audio.mic.capture_stopped(),
             },
+            Some(path) = recv_path(&mut local.files) => {
+                // Identifiants espacés : chaque fichier d'un dossier a le sien.
+                let id = next_file_id;
+                next_file_id = next_file_id.wrapping_add(1 << 16);
+                tokio::spawn(crate::transfer::send_path(path, id, files_out.clone()));
+            }
             Some(text) = recv_clipboard(&mut local.clipboard) => {
                 log::debug!("presse-papier local modifié ({} octets), envoi", text.len());
                 send(out, Message::Clipboard(text)).await?;
@@ -776,6 +793,15 @@ fn audio_directions(config: &AudioConfig, state: &State) -> (bool, bool) {
     }
 }
 
+async fn recv_path(
+    files: &mut Option<mpsc::Receiver<std::path::PathBuf>>,
+) -> Option<std::path::PathBuf> {
+    match files {
+        Some(files) => files.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 async fn recv_clipboard(clipboard: &mut Option<ClipboardSync>) -> Option<String> {
     match clipboard {
         Some(c) => c.changes.recv().await,
@@ -965,6 +991,9 @@ async fn on_message(
                 }
             }
         }
+        Message::FileStart { id, path, size } => state.incoming.start(id, &path, size),
+        Message::FileChunk { id, data } => state.incoming.chunk(id, &data),
+        Message::FileEnd { id } => state.incoming.end(id),
         Message::Side(code) => {
             let Some(expected) = mirrored_side(code) else {
                 return Ok(());

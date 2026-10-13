@@ -4,7 +4,7 @@ use input_event::{Event, KeyboardEvent, PointerEvent};
 use serde::{Deserialize, Serialize};
 
 /// Version du protocole, incrémentée à chaque changement incompatible.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// Taille maximale d'un texte de presse-papier synchronisé (512 Kio).
 pub const MAX_CLIPBOARD_LEN: usize = 512 * 1024;
@@ -54,6 +54,12 @@ pub enum Message {
     /// Côté où l'émetteur voit l'autre PC (0 gauche, 1 droite, 2 haut, 3 bas) :
     /// deux réglages incohérents sont harmonisés.
     Side(u8),
+    /// Début d'un fichier envoyé : chemin relatif (« dossier/fichier.txt »).
+    FileStart { id: u32, path: String, size: u64 },
+    /// Morceau d'un fichier.
+    FileChunk { id: u32, data: Vec<u8> },
+    /// Fichier complet.
+    FileEnd { id: u32 },
 }
 
 /// Ce que chaque PC annonce de lui-même à la connexion.

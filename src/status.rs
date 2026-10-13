@@ -167,6 +167,67 @@ impl BtStatus {
     }
 }
 
+/// Transferts de fichiers, sur des lignes `@file <état> <pourcentage> <nom>`.
+pub const FILE_PREFIX: &str = "@file ";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileDirection {
+    Sending,
+    Receiving,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileStatus {
+    pub direction: FileDirection,
+    /// 0 à 100 ; 100 : terminé.
+    pub percent: u8,
+    /// Nom du fichier (envoi) ou chemin où il a été enregistré (réception).
+    pub name: String,
+    /// Échec : le fichier n'est pas complet.
+    pub failed: bool,
+}
+
+impl FileStatus {
+    fn encode(&self) -> String {
+        let kind = match (self.direction, self.failed) {
+            (_, true) => "failed",
+            (FileDirection::Sending, false) => "sending",
+            (FileDirection::Receiving, false) => "receiving",
+        };
+        let direction = match self.direction {
+            FileDirection::Sending => "out",
+            FileDirection::Receiving => "in",
+        };
+        format!("{kind} {direction} {} {}", self.percent, self.name)
+    }
+
+    pub fn parse(line: &str) -> Option<Self> {
+        let mut parts = line.strip_prefix(FILE_PREFIX)?.splitn(4, ' ');
+        let failed = match parts.next()? {
+            "failed" => true,
+            "sending" | "receiving" => false,
+            _ => return None,
+        };
+        let direction = match parts.next()? {
+            "out" => FileDirection::Sending,
+            "in" => FileDirection::Receiving,
+            _ => return None,
+        };
+        let percent = parts.next()?.parse().ok()?;
+        let name = parts.next()?.to_owned();
+        Some(Self {
+            direction,
+            percent,
+            name,
+            failed,
+        })
+    }
+}
+
+pub fn emit_file(status: &FileStatus) {
+    emit_line(FILE_PREFIX, &status.encode());
+}
+
 fn emit_line(prefix: &str, text: &str) {
     if ENABLED.load(Ordering::Relaxed) {
         let mut out = std::io::stdout().lock();
@@ -245,5 +306,17 @@ mod tests {
             let line = format!("{BT_PREFIX}{}", bt.encode());
             assert_eq!(BtStatus::parse(&line), Some(bt));
         }
+    }
+
+    #[test]
+    fn file_roundtrip() {
+        let status = FileStatus {
+            direction: FileDirection::Receiving,
+            percent: 42,
+            name: "/home/moi/Téléchargements/one-mouse/mon fichier.txt".into(),
+            failed: false,
+        };
+        let line = format!("{FILE_PREFIX}{}", status.encode());
+        assert_eq!(FileStatus::parse(&line), Some(status));
     }
 }

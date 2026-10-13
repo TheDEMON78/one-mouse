@@ -26,6 +26,7 @@ mod protocol;
 mod session;
 mod settings;
 mod status;
+mod transfer;
 mod tray;
 mod update;
 
@@ -217,13 +218,22 @@ async fn shutdown_signal() {
 
 /// Se termine quand la fenêtre qui a lancé le moteur ferme son entrée standard
 /// (arrêt demandé, ou fenêtre fermée / plantée).
-async fn parent_closed() {
+/// Lit les commandes de la fenêtre sur l'entrée standard (« @send <chemin> » :
+/// fichier à envoyer) ; se termine quand la fenêtre se ferme (fin de l'entrée).
+fn watch_parent(
+    files: tokio::sync::mpsc::Sender<std::path::PathBuf>,
+) -> tokio::sync::oneshot::Receiver<()> {
+    use std::io::BufRead;
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     std::thread::spawn(move || {
-        let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+        for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+            if let Some(path) = line.strip_prefix("@send ") {
+                let _ = files.blocking_send(std::path::PathBuf::from(path));
+            }
+        }
         let _ = tx.send(());
     });
-    let _ = rx.await;
+    rx
 }
 
 async fn run(cli: Cli, mode: Mode) -> Result<()> {
@@ -261,16 +271,25 @@ async fn run(cli: Cli, mode: Mode) -> Result<()> {
             quality: cli.sound_quality,
             bluetooth: cli.bluetooth,
         },
+        files: None,
     };
 
     let watch_parent = cli.status;
+    // Avec la fenêtre : commandes (fichiers à envoyer) et fin quand elle se ferme.
+    let parent_closed = if watch_parent {
+        let (files_tx, files_rx) = tokio::sync::mpsc::channel(64);
+        local.files = Some(files_rx);
+        Some(self::watch_parent(files_tx))
+    } else {
+        None
+    };
     let result = tokio::select! {
         r = serve(&mode, &mut local) => r,
         _ = shutdown_signal() => {
             log::info!("arrêt demandé");
             Ok(())
         }
-        _ = parent_closed(), if watch_parent => {
+        _ = async { parent_closed.expect("surveillance de la fenêtre").await }, if watch_parent => {
             log::info!("arrêt demandé par la fenêtre");
             Ok(())
         }
