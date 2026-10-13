@@ -109,7 +109,7 @@ struct Cli {
 
     /// Liaison Bluetooth : le PC qui attend publie aussi un service Bluetooth, et
     /// celui qui se connecte sans adresse trouve seul l'autre PC associé. Le son
-    /// est compressé pour tenir dans le débit du Bluetooth.
+    /// n'est compressé que si la liaison passe réellement par le Bluetooth.
     #[arg(long, global = true)]
     bluetooth: bool,
 
@@ -320,8 +320,7 @@ async fn serve(mode: &Mode, local: &mut Local) -> Result<()> {
                     }
                     Incoming::Bluetooth(Ok((stream, name))) => {
                         log::info!("connexion Bluetooth entrante de « {name} »");
-                        match session::run_on(stream, None, true, true, Role::Listener, local).await
-                        {
+                        match session::run_on(stream, None, true, Role::Listener, local).await {
                             Ok(()) => log::info!("« {name} » s'est déconnecté"),
                             Err(e) => log::warn!("connexion Bluetooth terminée : {e:#}"),
                         }
@@ -343,13 +342,11 @@ async fn serve(mode: &Mode, local: &mut Local) -> Result<()> {
             let mut last_error = String::new();
             loop {
                 status::emit(Status::Connecting);
-                match bluetooth::connect_paired().await {
+                match bluetooth::connect_paired(bluetooth::known_peer()).await {
                     Ok((stream, name)) => {
                         last_error.clear();
                         log::info!("relié en Bluetooth à « {name} »");
-                        match session::run_on(stream, None, true, true, Role::Connector, local)
-                            .await
-                        {
+                        match session::run_on(stream, None, true, Role::Connector, local).await {
                             Ok(()) => log::info!("« {name} » s'est déconnecté"),
                             Err(e) => log::warn!("connexion Bluetooth terminée : {e:#}"),
                         }

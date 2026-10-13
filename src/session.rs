@@ -81,19 +81,19 @@ pub async fn run(stream: TcpStream, role: Role, local: &mut Local) -> Result<()>
     stream.set_nodelay(true)?;
     let peer_ip = stream.peer_addr()?.ip();
     // Réseau personnel Bluetooth : la connexion passe par la carte Bluetooth.
+    // Sinon, même avec l'option Bluetooth cochée, c'est le réseau local : son
+    // sans perte.
     let via_bluetooth = crate::network::is_bluetooth_ip(stream.local_addr()?.ip());
-    let compress = local.audio.bluetooth || via_bluetooth;
-    run_on(stream, Some(peer_ip), compress, via_bluetooth, role, local).await
+    run_on(stream, Some(peer_ip), via_bluetooth, role, local).await
 }
 
 /// Session sur n'importe quel flux : connexion TCP, ou lien Bluetooth direct
-/// (`peer_ip` absent : pas d'UDP, le son passe par le flux). `bluetooth` : son
-/// compressé pour le débit du Bluetooth ; `via_bluetooth` : la liaison passe
-/// réellement par le Bluetooth (affiché dans la fenêtre).
+/// (`peer_ip` absent : pas d'UDP, le son passe par le flux). `via_bluetooth` :
+/// la liaison passe réellement par le Bluetooth, le son est alors compressé pour
+/// tenir dans son débit.
 pub async fn run_on<S>(
     stream: S,
     peer_ip: Option<std::net::IpAddr>,
-    bluetooth: bool,
     via_bluetooth: bool,
     role: Role,
     local: &mut Local,
@@ -123,10 +123,10 @@ where
         side_name(local.peer_side),
         if peer.main { ", PC principal" } else { "" }
     );
-    if bluetooth {
+    if via_bluetooth {
         log::info!("liaison Bluetooth : son compressé (Opus) pour tenir dans son débit");
     }
-    let link = (local.audio.quality, bluetooth);
+    let link = (local.audio.quality, via_bluetooth);
 
     let (out_tx, mut out_rx) = mpsc::channel::<Message>(1024);
     let (in_tx, mut in_rx) = mpsc::channel::<Message>(1024);
@@ -174,6 +174,13 @@ where
         recv_ok: false,
     };
 
+    // Adresse Bluetooth de ce PC : l'autre la mémorise pour pouvoir s'y relier
+    // en Bluetooth plus tard, sans recherche.
+    if let Ok(Some(address)) =
+        tokio::time::timeout(Duration::from_secs(2), crate::bluetooth::local_address()).await
+    {
+        send(&out_tx, Message::BluetoothAddress(address)).await?;
+    }
     status::emit(Status::Connected(peer.name.clone()));
     status::emit_link(if via_bluetooth {
         LinkStatus::Bluetooth
@@ -408,6 +415,10 @@ fn send_audio(
 #[derive(Default)]
 struct AudioLink {
     capture: Option<AudioCapture>,
+    /// Capture en cours d'ouverture, hors de la boucle principale : ouvrir un
+    /// périphérique peut prendre du temps (jusqu'à une seconde sous Windows),
+    /// pendant lequel le son reçu et la souris ne doivent pas attendre.
+    capture_pending: Option<tokio::task::JoinHandle<Result<AudioCapture>>>,
     /// Pas de nouvel essai de capture avant cet instant (échec récent).
     capture_retry: Option<Instant>,
     /// Échecs de capture d'affilée (seul le premier est signalé).
@@ -419,6 +430,8 @@ struct AudioLink {
     last_sent: Vec<u8>,
     decoder: Option<AudioDecoder>,
     player: Option<AudioPlayer>,
+    /// Lecture en cours d'ouverture, hors de la boucle principale.
+    player_pending: Option<tokio::task::JoinHandle<Result<AudioPlayer>>>,
     player_retry: Option<Instant>,
     player_failures: u32,
 }
@@ -465,7 +478,12 @@ impl AudioLink {
     fn sync_capture(&mut self, wanted: bool, source: Source, device: Option<&str>) {
         if !wanted {
             self.capture = None;
+            // Une ouverture en cours se termine seule ; son résultat est abandonné.
+            self.capture_pending = None;
             return;
+        }
+        if let Some(result) = take_finished(&mut self.capture_pending) {
+            self.capture_started(result, source);
         }
         if self.capture.as_ref().is_some_and(AudioCapture::is_broken) {
             log::info!("capture audio interrompue ({source:?}), relance");
@@ -473,12 +491,20 @@ impl AudioLink {
             self.capture_retry = Some(Instant::now() + AUDIO_RESTART);
         }
         if self.capture.is_some()
+            || self.capture_pending.is_some()
             || self.encoder_failed
             || self.capture_retry.is_some_and(|at| Instant::now() < at)
         {
             return;
         }
-        match AudioCapture::start(source, device) {
+        let device = device.map(str::to_owned);
+        self.capture_pending = Some(tokio::task::spawn_blocking(move || {
+            AudioCapture::start(source, device.as_deref())
+        }));
+    }
+
+    fn capture_started(&mut self, result: Result<AudioCapture>, source: Source) {
+        match result {
             Ok(capture) => {
                 if self.capture_failures > 0 {
                     log::info!("capture audio rétablie ({source:?})");
@@ -518,32 +544,61 @@ impl AudioLink {
             self.player = None;
             self.player_retry = Some(Instant::now() + AUDIO_RESTART);
         }
-        if self.player.is_none() && self.player_retry.is_none_or(|at| Instant::now() >= at) {
-            match AudioPlayer::start(output) {
-                Ok(player) => {
-                    if self.player_failures > 0 {
-                        log::info!("lecture du son reçu rétablie");
-                    }
-                    self.player_failures = 0;
-                    self.player_retry = None;
-                    self.player = Some(player);
-                }
-                Err(e) => {
-                    if self.player_failures == 0 {
-                        log::warn!(
-                            "lecture du son reçu impossible pour l'instant : {e:#} — nouvel essai \
-                             toutes les {} s",
-                            AUDIO_RETRY.as_secs()
-                        );
-                    }
-                    self.player_failures += 1;
-                    self.player_retry = Some(Instant::now() + AUDIO_RETRY);
-                }
-            }
+        if let Some(result) = take_finished(&mut self.player_pending) {
+            self.player_started(result);
+        }
+        if self.player.is_none()
+            && self.player_pending.is_none()
+            && self.player_retry.is_none_or(|at| Instant::now() >= at)
+        {
+            let output = output.map(str::to_owned);
+            self.player_pending = Some(tokio::task::spawn_blocking(move || {
+                AudioPlayer::start(output.as_deref())
+            }));
         }
         if let Some(player) = &mut self.player {
             player.push(frame);
         }
+    }
+
+    fn player_started(&mut self, result: Result<AudioPlayer>) {
+        match result {
+            Ok(player) => {
+                if self.player_failures > 0 {
+                    log::info!("lecture du son reçu rétablie");
+                }
+                self.player_failures = 0;
+                self.player_retry = None;
+                self.player = Some(player);
+            }
+            Err(e) => {
+                if self.player_failures == 0 {
+                    log::warn!(
+                        "lecture du son reçu impossible pour l'instant : {e:#} — nouvel essai \
+                         toutes les {} s",
+                        AUDIO_RETRY.as_secs()
+                    );
+                }
+                self.player_failures += 1;
+                self.player_retry = Some(Instant::now() + AUDIO_RETRY);
+            }
+        }
+    }
+}
+
+/// Résultat d'une ouverture de périphérique terminée (sans attendre si elle ne
+/// l'est pas encore).
+fn take_finished<T>(pending: &mut Option<tokio::task::JoinHandle<Result<T>>>) -> Option<Result<T>> {
+    use futures::FutureExt;
+    if !pending.as_ref()?.is_finished() {
+        return None;
+    }
+    let handle = pending.take()?;
+    match handle.now_or_never()? {
+        Ok(result) => Some(result),
+        Err(e) => Some(Err(anyhow::anyhow!(
+            "ouverture du périphérique audio interrompue : {e}"
+        ))),
     }
 }
 
@@ -815,6 +870,9 @@ async fn on_message(
                     }
                 }
             }
+        }
+        Message::BluetoothAddress(address) => {
+            crate::bluetooth::remember_peer(address, &state.peer_name);
         }
         Message::Ping | Message::Probe | Message::UdpPort(_) | Message::UdpOk => {}
         Message::Hello { .. } => bail!("message Hello inattendu"),

@@ -209,6 +209,8 @@ struct App {
     /// Adresse de ce PC sur la liaison Bluetooth, revérifiée régulièrement.
     bluetooth_ip: Option<IpAddr>,
     bluetooth_checked: Instant,
+    /// Autre PC dont l'adresse Bluetooth a été apprise par le réseau.
+    bluetooth_peer: Option<crate::bluetooth::KnownPeer>,
     error: Option<String>,
     logo: egui::TextureHandle,
     tab: Tab,
@@ -245,6 +247,7 @@ impl App {
             inputs: audio::input_names(),
             local_ip: local_ip(),
             bluetooth_ip: network::bluetooth_ip(),
+            bluetooth_peer: crate::bluetooth::known_peer(),
             bluetooth_checked: Instant::now(),
             error: None,
             logo,
@@ -347,7 +350,7 @@ impl App {
             (true, Some(Status::Connecting)) => (
                 ORANGE,
                 "Connexion".into(),
-                if self.settings.bluetooth && self.settings.address.trim().is_empty() {
+                if self.settings.bluetooth {
                     "Recherche de l'autre PC en Bluetooth…".into()
                 } else {
                     format!("Recherche de {}…", self.settings.address.trim())
@@ -437,6 +440,7 @@ impl App {
             {
                 // La liaison Bluetooth peut s'établir pendant que la fenêtre est ouverte.
                 self.bluetooth_ip = network::bluetooth_ip();
+                self.bluetooth_peer = crate::bluetooth::known_peer();
                 self.bluetooth_checked = Instant::now();
                 ui.ctx().request_repaint_after(Duration::from_secs(3));
             }
@@ -510,20 +514,21 @@ impl App {
                         "Ce PC rejoint l'autre",
                     );
                 });
-                if s.connect {
+                if s.connect && s.bluetooth {
                     ui.add_space(4.0);
-                    let (label, hint) = if s.bluetooth {
-                        (
-                            "Adresse de l'autre PC (facultatif en Bluetooth)",
-                            "vide : recherche automatique en Bluetooth",
+                    ui.label(
+                        egui::RichText::new(
+                            "Liaison Bluetooth : aucune adresse à saisir, l'autre PC est trouvé \
+                             en Bluetooth.",
                         )
-                    } else {
-                        ("Adresse de l'autre PC", "192.168.1.20")
-                    };
-                    field(ui, label, |ui| {
+                        .color(MUTED),
+                    );
+                } else if s.connect {
+                    ui.add_space(4.0);
+                    field(ui, "Adresse de l'autre PC", |ui| {
                         ui.add(
                             egui::TextEdit::singleline(&mut s.address)
-                                .hint_text(hint)
+                                .hint_text("192.168.1.20")
                                 .desired_width(f32::INFINITY),
                         );
                     });
@@ -550,7 +555,7 @@ impl App {
                 });
                 if s.bluetooth {
                     ui.add_space(6.0);
-                    bluetooth_steps(ui);
+                    bluetooth_steps(ui, self.bluetooth_peer.as_ref());
                 }
             });
 
@@ -729,8 +734,9 @@ impl App {
                 if self.settings.bluetooth {
                     ui.label(
                         egui::RichText::new(
-                            "Liaison Bluetooth choisie : le son est compressé automatiquement \
-                             pour tenir dans son débit.",
+                            "Liaison Bluetooth choisie : quand la connexion passe vraiment par \
+                             le Bluetooth, le son est compressé pour tenir dans son débit (par le \
+                             réseau, il reste sans perte).",
                         )
                         .small()
                         .color(ORANGE),
@@ -1093,8 +1099,8 @@ fn status_pill(ui: &mut egui::Ui, color: egui::Color32, text: &str) {
 }
 
 /// Grande vignette cliquable pour un choix entre deux options.
-/// Étapes pour relier les deux PC par Bluetooth (réseau personnel).
-fn bluetooth_steps(ui: &mut egui::Ui) {
+/// Étapes pour relier les deux PC par Bluetooth.
+fn bluetooth_steps(ui: &mut egui::Ui, peer: Option<&crate::bluetooth::KnownPeer>) {
     let step = |ui: &mut egui::Ui, n: &str, text: &str| {
         ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new(n).strong().color(ACCENT));
@@ -1104,13 +1110,33 @@ fn bluetooth_steps(ui: &mut egui::Ui) {
     if cfg!(target_os = "macos") {
         ui.label(
             egui::RichText::new(
-                "Bluetooth direct pas encore disponible sous macOS : utilisez le réseau, ou un \
-                 réseau personnel Bluetooth en saisissant l'adresse de l'autre PC.",
+                "Bluetooth direct pas encore disponible sous macOS : choisissez la liaison par \
+                 le réseau.",
             )
             .color(ORANGE),
         );
         return;
     }
+    match peer {
+        Some(peer) => ui.label(
+            egui::RichText::new(format!(
+                "Autre PC connu : « {} » ({}), appris lors d'une connexion par le réseau. Le \
+                 Bluetooth le vise directement ; s'ils ne sont pas encore associés, le système \
+                 propose l'association (un clic sur chaque PC).",
+                peer.name,
+                crate::bluetooth::format_address(peer.address)
+            ))
+            .color(GREEN),
+        ),
+        None => ui.label(
+            egui::RichText::new(
+                "Astuce : connectez-vous une fois par le réseau, les deux PC apprennent alors \
+                 leurs adresses Bluetooth et se retrouvent ensuite directement.",
+            )
+            .small()
+            .color(MUTED),
+        ),
+    };
     step(
         ui,
         "1.",

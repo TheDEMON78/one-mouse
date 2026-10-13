@@ -29,7 +29,75 @@ mod unsupported;
 #[cfg(not(any(windows, target_os = "linux")))]
 use unsupported as imp;
 
-pub use imp::{Server, connect_paired};
+pub use imp::{Server, connect_paired, local_address};
+
+/// Autre PC dont l'adresse Bluetooth a été apprise lors d'une connexion par le
+/// réseau : en Bluetooth, il est visé directement (et associé si besoin).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct KnownPeer {
+    pub address: u64,
+    pub name: String,
+}
+
+fn known_peer_path() -> Option<std::path::PathBuf> {
+    directories::ProjectDirs::from("com", "BloopStudio", "one-mouse")
+        .map(|dirs| dirs.config_dir().join("bluetooth-peer.json"))
+}
+
+/// Mémorise l'adresse Bluetooth de l'autre PC.
+pub fn remember_peer(address: u64, name: &str) {
+    let peer = KnownPeer {
+        address,
+        name: name.to_owned(),
+    };
+    if known_peer().as_ref() == Some(&peer) {
+        return;
+    }
+    let Some(path) = known_peer_path() else {
+        return;
+    };
+    let saved = path
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::write(&path, serde_json::to_vec(&peer).unwrap_or_default()));
+    match saved {
+        Ok(()) => log::info!(
+            "adresse Bluetooth de « {name} » mémorisée ({}) : en Bluetooth, il sera visé directement",
+            format_address(address)
+        ),
+        Err(e) => log::debug!("adresse Bluetooth non mémorisée : {e}"),
+    }
+}
+
+/// Autre PC mémorisé, s'il y en a un.
+pub fn known_peer() -> Option<KnownPeer> {
+    let data = std::fs::read(known_peer_path()?).ok()?;
+    serde_json::from_slice(&data).ok()
+}
+
+/// Adresse Bluetooth au format « AA:BB:CC:DD:EE:FF ».
+pub fn format_address(address: u64) -> String {
+    let bytes = address.to_be_bytes();
+    bytes[2..]
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// Lit une adresse « AA:BB:CC:DD:EE:FF ».
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn parse_address(text: &str) -> Option<u64> {
+    let parts: Vec<&str> = text.split(':').collect();
+    if parts.len() != 6 {
+        return None;
+    }
+    parts.iter().try_fold(0u64, |acc, part| {
+        u8::from_str_radix(part, 16)
+            .ok()
+            .map(|b| (acc << 8) | u64::from(b))
+    })
+}
 
 /// Identifiant du service one-mouse (« one-mouse-bloop1 » en ASCII). Sous
 /// Windows, le même sous forme de GUID (`windows::SERVICE_GUID`).
@@ -163,6 +231,19 @@ fn bridge<S: BlockingSocket>(socket: S, keep_alive: Box<dyn Send>) -> Stream {
         socket.shutdown();
     });
     app
+}
+
+#[cfg(test)]
+mod address_tests {
+    use super::{format_address, parse_address};
+
+    #[test]
+    fn address_roundtrip() {
+        let address = 0x00_1A_7D_DA_71_13;
+        assert_eq!(format_address(address), "00:1A:7D:DA:71:13");
+        assert_eq!(parse_address("00:1A:7D:DA:71:13"), Some(address));
+        assert_eq!(parse_address("pas une adresse"), None);
+    }
 }
 
 #[cfg(all(test, unix))]

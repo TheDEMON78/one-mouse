@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail};
 use tokio::sync::mpsc;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Value};
 
-use super::{NO_PAIRED, NOT_FOUND, SERVICE_UUID, Stream, bridge};
+use super::{KnownPeer, NO_PAIRED, NOT_FOUND, SERVICE_UUID, Stream, bridge, parse_address};
 
 const PROFILE_PATH: &str = "/com/bloopstudio/onemouse/bluetooth";
 /// Canal RFCOMM du service (annoncé par SDP : l'autre PC le découvre seul).
@@ -205,9 +205,42 @@ impl Server {
     }
 }
 
-pub async fn connect_paired() -> Result<(Stream, String)> {
+/// Adresse Bluetooth de ce PC (premier adaptateur).
+pub async fn local_address() -> Option<u64> {
+    let conn = zbus::Connection::system().await.ok()?;
+    managed_objects(&conn)
+        .await
+        .ok()?
+        .into_iter()
+        .find_map(|(_, ifaces)| {
+            let address = ifaces.get("org.bluez.Adapter1")?.get("Address")?;
+            parse_address(&String::try_from(address.try_clone().ok()?).ok()?)
+        })
+}
+
+/// Chemin BlueZ de l'appareil à cette adresse, s'il est connu de BlueZ.
+async fn device_path(conn: &zbus::Connection, address: u64) -> Option<OwnedObjectPath> {
+    managed_objects(conn)
+        .await
+        .ok()?
+        .into_iter()
+        .find_map(|(path, ifaces)| {
+            let value = ifaces.get("org.bluez.Device1")?.get("Address")?;
+            let text = String::try_from(value.try_clone().ok()?).ok()?;
+            (parse_address(&text) == Some(address)).then_some(path)
+        })
+}
+
+pub async fn connect_paired(known: Option<KnownPeer>) -> Result<(Stream, String)> {
     let mut registered = register("client").await?;
-    let devices = paired_computers(&registered.conn).await?;
+    let mut devices = paired_computers(&registered.conn).await?;
+    // L'autre PC connu (adresse apprise par le réseau) d'abord.
+    if let Some(known) = known
+        && let Some(path) = device_path(&registered.conn, known.address).await
+    {
+        devices.retain(|(p, _)| *p != path);
+        devices.insert(0, (path, known.name));
+    }
     if devices.is_empty() {
         bail!(NO_PAIRED);
     }

@@ -90,8 +90,12 @@ Le débit du Bluetooth (1 à 2 Mbit/s) ne permet pas le son sans perte : il est 
 256 kbit/s, micro 64 kbit/s), avec un peu plus de latence et une portée d'une dizaine de mètres. Le réseau local reste
 le meilleur choix pour un son parfait.
 
-Sous macOS, le Bluetooth direct n'est pas encore disponible : un réseau personnel Bluetooth (PAN) fonctionne en
-saisissant l'adresse de l'autre PC. En ligne de commande : `--bluetooth`, et `connect` sans adresse.
+En mode Bluetooth, la connexion passe toujours par le Bluetooth (aucune adresse réseau n'est utilisée). Après une
+connexion par le réseau, les deux PC mémorisent leurs adresses Bluetooth : en Bluetooth, chacun vise alors directement
+l'autre, et le système propose l'association s'ils ne sont pas encore associés.
+
+Sous macOS, le Bluetooth direct n'est pas encore disponible. En ligne de commande : `--bluetooth`, et `connect` sans
+adresse.
 
 ## Son et micro
 

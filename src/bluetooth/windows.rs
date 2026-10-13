@@ -11,10 +11,13 @@ use std::sync::Once;
 
 use anyhow::{Context, Result, bail};
 use windows_sys::Win32::Devices::Bluetooth::{
-    AF_BTH, BLUETOOTH_DEVICE_INFO, BLUETOOTH_DEVICE_SEARCH_PARAMS, BTHPROTO_RFCOMM,
-    BluetoothEnableDiscovery, BluetoothEnableIncomingConnections, BluetoothFindDeviceClose,
-    BluetoothFindFirstDevice, BluetoothFindNextDevice, NS_BTH, SOCKADDR_BTH,
+    AF_BTH, BLUETOOTH_DEVICE_INFO, BLUETOOTH_DEVICE_SEARCH_PARAMS, BLUETOOTH_FIND_RADIO_PARAMS,
+    BLUETOOTH_RADIO_INFO, BTHPROTO_RFCOMM, BluetoothEnableDiscovery,
+    BluetoothEnableIncomingConnections, BluetoothFindDeviceClose, BluetoothFindFirstDevice,
+    BluetoothFindFirstRadio, BluetoothFindNextDevice, BluetoothFindRadioClose,
+    BluetoothGetRadioInfo, NS_BTH, SOCKADDR_BTH,
 };
+use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::Networking::WinSock::{
     CSADDR_INFO, INVALID_SOCKET, RNRSERVICE_DELETE, RNRSERVICE_REGISTER, SD_BOTH, SOCK_STREAM,
     SOCKADDR, SOCKET, SOCKET_ADDRESS, WSADATA, WSAQUERYSETW, WSASetServiceW, WSAStartup, accept,
@@ -22,7 +25,7 @@ use windows_sys::Win32::Networking::WinSock::{
 };
 use windows_sys::core::GUID;
 
-use super::{BlockingSocket, NO_PAIRED, NOT_FOUND, Stream, bridge};
+use super::{BlockingSocket, KnownPeer, NO_PAIRED, NOT_FOUND, Stream, bridge};
 
 /// [`super::SERVICE_UUID`] au format de Windows.
 const SERVICE_GUID: GUID = GUID {
@@ -280,9 +283,39 @@ impl Drop for Server {
     }
 }
 
-pub async fn connect_paired() -> Result<(Stream, String)> {
-    let (socket, name) = tokio::task::spawn_blocking(|| {
-        let devices = paired_computers();
+/// Adresse Bluetooth de ce PC (première radio).
+pub async fn local_address() -> Option<u64> {
+    // SAFETY : structures initialisées avec leur taille ; poignées refermées.
+    unsafe {
+        let params = BLUETOOTH_FIND_RADIO_PARAMS {
+            dwSize: size_of::<BLUETOOTH_FIND_RADIO_PARAMS>() as u32,
+        };
+        let mut radio = null_mut();
+        let find = BluetoothFindFirstRadio(&params, &mut radio);
+        if find.is_null() {
+            return None;
+        }
+        BluetoothFindRadioClose(find);
+        let mut info: BLUETOOTH_RADIO_INFO = zeroed();
+        info.dwSize = size_of::<BLUETOOTH_RADIO_INFO>() as u32;
+        let ok = BluetoothGetRadioInfo(radio, &mut info) == 0;
+        CloseHandle(radio);
+        ok.then_some(info.address.Anonymous.ullLong)
+            .filter(|&a| a != 0)
+    }
+}
+
+pub async fn connect_paired(known: Option<KnownPeer>) -> Result<(Stream, String)> {
+    let (socket, name) = tokio::task::spawn_blocking(move || {
+        // L'autre PC connu (adresse apprise par le réseau) d'abord, même s'il n'est
+        // pas encore associé : Windows propose alors l'association.
+        let mut devices: Vec<(u64, String)> =
+            known.map(|k| (k.address, k.name)).into_iter().collect();
+        for device in paired_computers() {
+            if devices.iter().all(|(a, _)| *a != device.0) {
+                devices.push(device);
+            }
+        }
         if devices.is_empty() {
             bail!(NO_PAIRED);
         }
