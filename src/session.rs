@@ -64,6 +64,8 @@ pub struct Local {
     pub keep_awake: bool,
     /// Réveiller l'autre PC (Wake-on-LAN) au démarrage, s'il ne répond pas.
     pub wake: bool,
+    /// Garder l'historique des copies (affiché par la fenêtre).
+    pub clipboard_history: bool,
 }
 
 #[derive(Default)]
@@ -448,6 +450,9 @@ async fn event_loop(
                 tokio::spawn(crate::transfer::send_path(path, id, files_out.clone()));
             }
             Some(clip) = recv_clipboard(&mut local.clipboard) => {
+                if local.clipboard_history {
+                    record_history(local.name.clone(), clip.clone());
+                }
                 let batch = next_file_id;
                 next_file_id = next_file_id.wrapping_add(1 << 16);
                 send_clip(clip, batch, files_out.clone(), out).await?;
@@ -866,6 +871,11 @@ async fn recv_path(
     }
 }
 
+/// Ajoute une copie à l'historique, hors de la boucle principale (fichiers).
+fn record_history(from: String, clip: crate::clipboard::Clip) {
+    tokio::task::spawn_blocking(move || crate::history::record(&from, &clip));
+}
+
 /// Envoie un contenu copié localement : le texte directement, les images et les
 /// fichiers par la file des fichiers (ils sont mis dans le presse-papier de
 /// l'autre PC une fois tous reçus).
@@ -1067,7 +1077,11 @@ async fn on_message(
             if let Some(clipboard) = &local.clipboard
                 && text.len() <= MAX_CLIPBOARD_LEN
             {
-                clipboard.set(crate::clipboard::Clip::Text(text));
+                let clip = crate::clipboard::Clip::Text(text);
+                if local.clipboard_history {
+                    record_history(state.peer_name.clone(), clip.clone());
+                }
+                clipboard.set(clip);
             }
         }
         Message::Audio {
@@ -1143,6 +1157,9 @@ async fn on_message(
             if let Some(clip) = state.incoming.end(id)
                 && let Some(clipboard) = &local.clipboard
             {
+                if local.clipboard_history {
+                    record_history(state.peer_name.clone(), clip.clone());
+                }
                 clipboard.set(clip);
             }
         }

@@ -89,6 +89,8 @@ pub struct Settings {
     pub keep_awake: bool,
     /// Réveiller l'autre PC au démarrage du partage.
     pub wake: bool,
+    /// Historique du presse-papier (effacé à la fermeture).
+    pub clipboard_history: bool,
     /// Version du format, pour adapter les anciens réglages (absent = ancien format 0).
     #[serde(default)]
     pub format: u32,
@@ -121,6 +123,7 @@ impl Default for Settings {
             lock_sync: true,
             keep_awake: true,
             wake: true,
+            clipboard_history: true,
             format: FORMAT,
         }
     }
@@ -211,6 +214,9 @@ impl Settings {
         }
         if !self.wake {
             args.push("--no-wake".to_owned());
+        }
+        if !self.clipboard_history {
+            args.push("--no-clipboard-history".to_owned());
         }
         if self.sound_quality != crate::codec::Quality::Lossless {
             args.push("--sound-quality".to_owned());

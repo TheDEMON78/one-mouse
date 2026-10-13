@@ -20,6 +20,7 @@ mod default_output;
 mod discovery;
 mod firewall;
 mod gui;
+mod history;
 mod network;
 mod power;
 mod powershell;
@@ -124,6 +125,10 @@ struct Cli {
     /// Ne pas réveiller l'autre PC (Wake-on-LAN) au démarrage.
     #[arg(long, global = true)]
     no_wake: bool,
+
+    /// Ne pas garder l'historique du presse-papier.
+    #[arg(long, global = true)]
+    no_clipboard_history: bool,
 
     /// Liaison Bluetooth : le PC qui attend publie aussi un service Bluetooth, et
     /// celui qui se connecte sans adresse trouve seul l'autre PC associé. Le son
@@ -289,6 +294,7 @@ async fn run(cli: Cli, mode: Mode) -> Result<()> {
         lock_sync: !cli.no_lock_sync,
         keep_awake: !cli.no_keep_awake,
         wake: !cli.no_wake,
+        clipboard_history: !cli.no_clipboard_history,
     };
 
     let watch_parent = cli.status;

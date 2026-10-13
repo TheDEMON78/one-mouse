@@ -64,10 +64,12 @@ cpal = { version = "0.18.2", features = ["pulseaudio"] }
 # Bluetooth direct : BlueZ par D-Bus (profils RFCOMM).
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 input-capture = "0.4.0"
-libc = "0.2"
 x11 = { version = "2.21", features = ["xlib", "xinput", "xfixes"] }
 input-emulation = "0.4.0"
 input-event = "0.4.0"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 cpal = "0.18.2"
@@ -79,7 +81,7 @@ input-event = { version = "0.4.0", default-features = false }
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
 tray-icon = { version = "0.26.1", default-features = false }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Devices_Bluetooth", "Win32_Networking_WinSock", "Win32_System_Com", "Win32_System_Power", "Win32_System_RemoteDesktop", "Win32_System_Shutdown", "Win32_System_DataExchange"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Devices_Bluetooth", "Win32_Networking_WinSock", "Win32_System_Com", "Win32_System_Power", "Win32_System_RemoteDesktop", "Win32_System_Shutdown", "Win32_System_DataExchange", "Win32_System_Time"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

@@ -251,6 +251,12 @@ struct App {
     updater: crate::update::Updater,
     /// Installation demandée à la main (bouton).
     install_requested: bool,
+    /// Historique du presse-papier affiché, relu régulièrement.
+    history: Vec<crate::history::Entry>,
+    history_loaded: Instant,
+    /// Presse-papier de la fenêtre (pour « Copier » depuis l'historique). Gardé
+    /// ouvert : sous Linux, son contenu disparaît avec lui.
+    clipboard: Option<arboard::Clipboard>,
 }
 
 impl App {
@@ -292,7 +298,12 @@ impl App {
                 crate::update::Updater::start(settings_auto_update, move || ctx.request_repaint())
             },
             install_requested: false,
+            history: Vec::new(),
+            history_loaded: Instant::now(),
+            clipboard: None,
         };
+        // Historique d'une session précédente (fermeture brutale) : effacé.
+        crate::history::clear();
         if hidden && app.tray.is_some() {
             // eframe montre la fenêtre après sa première image : on la cache ensuite.
             app.hide_after_frames = Some(2);
@@ -491,6 +502,109 @@ impl App {
             }
         }
         self.tab = Tab::Connection;
+    }
+
+    /// Onglet « Presse-papier » : les dernières copies des deux PC.
+    fn clipboard_tab(&mut self, ui: &mut egui::Ui) {
+        use crate::history::Content;
+        if self.history_loaded.elapsed() > Duration::from_secs(1) || self.history.is_empty() {
+            self.history = crate::history::load();
+            self.history_loaded = Instant::now();
+        }
+        ui.ctx().request_repaint_after(Duration::from_secs(1));
+        card(ui, |ui| {
+            section_title(ui, "Historique du presse-papier");
+            ui.label(
+                egui::RichText::new(
+                    "Les 20 dernières copies des deux PC. « Copier » remet l'élément dans le \
+                     presse-papier (et dans celui de l'autre PC). Effacé à la fermeture de one-mouse.",
+                )
+                .color(MUTED),
+            );
+            if !self.settings.clipboard_history {
+                ui.label(
+                    egui::RichText::new("Historique désactivé dans l'onglet Options.")
+                        .color(ORANGE),
+                );
+            } else if self.history.is_empty() {
+                ui.label(egui::RichText::new("Rien de copié pour l'instant.").color(MUTED));
+            } else if ui.small_button("Vider l'historique").clicked() {
+                crate::history::clear();
+                self.history.clear();
+            }
+        });
+        let mut copy = None;
+        for (index, entry) in self.history.iter().enumerate() {
+            card(ui, |ui| {
+                let time = chrono_time(entry.at);
+                ui.label(
+                    egui::RichText::new(format!("Copié sur « {} » à {time}", entry.from))
+                        .small()
+                        .color(MUTED),
+                );
+                let preview = match &entry.content {
+                    Content::Text { text } => {
+                        let mut short: String = text.chars().take(300).collect();
+                        if short.len() < text.len() {
+                            short.push('…');
+                        }
+                        short
+                    }
+                    Content::Image { width, height, .. } => format!("Image {width} × {height}"),
+                    Content::Files { paths } => paths
+                        .iter()
+                        .map(|p| {
+                            p.file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_default()
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                };
+                ui.label(egui::RichText::new(preview).color(TEXT));
+                if ui.small_button("Copier").clicked() {
+                    copy = Some(index);
+                }
+            });
+        }
+        if let Some(index) = copy {
+            self.copy_from_history(index);
+        }
+    }
+
+    fn copy_from_history(&mut self, index: usize) {
+        use crate::clipboard::Clip;
+        let Some(clip) = self
+            .history
+            .get(index)
+            .and_then(|entry| crate::history::to_clip(&entry.content))
+        else {
+            self.error = Some("Cet élément n'est plus disponible.".into());
+            return;
+        };
+        if self.clipboard.is_none() {
+            self.clipboard = arboard::Clipboard::new().ok();
+        }
+        let Some(clipboard) = self.clipboard.as_mut() else {
+            self.error = Some("Presse-papier indisponible.".into());
+            return;
+        };
+        let result = match clip {
+            Clip::Text(text) => clipboard.set_text(text),
+            Clip::Files(files) => clipboard.set().file_list(&files),
+            Clip::Image {
+                width,
+                height,
+                rgba,
+            } => clipboard.set_image(arboard::ImageData {
+                width,
+                height,
+                bytes: rgba.into(),
+            }),
+        };
+        if let Err(e) = result {
+            self.error = Some(format!("Copie impossible : {e}"));
+        }
     }
 
     /// Carte « Fichiers » : envois et réceptions récents.
@@ -1023,6 +1137,10 @@ impl App {
                     "Aucun des deux PC ne s'endort tant qu'ils sont connectés : son, micro et \
                      souris restent disponibles. L'écran peut toujours s'éteindre.",
                 );
+                ui.checkbox(
+                    &mut s.clipboard_history,
+                    "Garder l'historique du presse-papier (effacé à la fermeture)",
+                );
                 ui.checkbox(&mut s.wake, "Réveiller l'autre PC au démarrage du partage")
                     .on_hover_text(
                         "S'il est en veille, l'autre PC est réveillé par le réseau (Wake-on-LAN). \
@@ -1217,6 +1335,49 @@ fn mic_line(ui: &mut egui::Ui, mic: &MicStatus) {
     }
 }
 
+/// Heure locale « HH:MM:SS » d'un instant (secondes depuis 1970).
+fn chrono_time(at: u64) -> String {
+    // Décalage horaire local : différence entre l'heure locale et UTC, connue du
+    // système via la fenêtre (egui n'en fournit pas) ; à défaut, heure UTC.
+    let offset = local_offset_seconds();
+    let secs = (at as i64 + offset).rem_euclid(86_400);
+    format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
+}
+
+#[cfg(unix)]
+fn local_offset_seconds() -> i64 {
+    // SAFETY : localtime_r remplit la structure fournie.
+    unsafe {
+        let now = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&now, &mut tm);
+        tm.tm_gmtoff
+    }
+}
+
+#[cfg(windows)]
+fn local_offset_seconds() -> i64 {
+    use windows_sys::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION};
+    // SAFETY : structure remplie par l'appel.
+    unsafe {
+        let mut info: TIME_ZONE_INFORMATION = std::mem::zeroed();
+        let mode = GetTimeZoneInformation(&mut info);
+        // 2 : heure d'été en vigueur.
+        let bias = info.Bias
+            + if mode == 2 {
+                info.DaylightBias
+            } else {
+                info.StandardBias
+            };
+        -(bias as i64) * 60
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn local_offset_seconds() -> i64 {
+    0
+}
+
 fn open_url(url: &str) {
     let result = if cfg!(windows) {
         std::process::Command::new("explorer").arg(url).spawn()
@@ -1246,15 +1407,17 @@ enum Tab {
     Connection,
     Screens,
     Sound,
+    Clipboard,
     Options,
     Log,
 }
 
 impl Tab {
-    const ALL: [Tab; 5] = [
+    const ALL: [Tab; 6] = [
         Tab::Connection,
         Tab::Screens,
         Tab::Sound,
+        Tab::Clipboard,
         Tab::Options,
         Tab::Log,
     ];
@@ -1264,6 +1427,7 @@ impl Tab {
             Tab::Connection => "Connexion",
             Tab::Screens => "Écrans",
             Tab::Sound => "Son",
+            Tab::Clipboard => "Presse-papier",
             Tab::Options => "Options",
             Tab::Log => "Journal",
         }
@@ -1689,6 +1853,7 @@ impl eframe::App for App {
                     Tab::Screens => self.screens_tab(ui, running),
                     Tab::Sound => self.sound_tab(ui, running),
                     Tab::Options => self.options_tab(ui, running),
+                    Tab::Clipboard => self.clipboard_tab(ui),
                     Tab::Log => self.log_tab(ui),
                 });
             });
@@ -1696,6 +1861,8 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.stop();
+        // L'historique peut contenir des données sensibles : effacé en partant.
+        crate::history::clear();
     }
 }
 
