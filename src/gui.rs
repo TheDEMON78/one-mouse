@@ -998,7 +998,14 @@ impl App {
             let s = &mut self.settings;
             card(ui, |ui| {
                 section_title(ui, "Partage");
-                ui.checkbox(&mut s.clipboard, "Partager le presse-papier (texte)");
+                ui.checkbox(
+                    &mut s.clipboard,
+                    "Partager le presse-papier (texte, images et fichiers)",
+                )
+                .on_hover_text(
+                    "Copiez sur un PC, collez sur l'autre avec Ctrl+V. Les fichiers copiés sont \
+                     transférés (1 Go au plus par copie) dans Téléchargements/one-mouse/Presse-papier.",
+                );
                 ui.checkbox(
                     &mut s.start_sharing,
                     "Démarrer le partage à l'ouverture de one-mouse",

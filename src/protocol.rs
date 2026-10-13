@@ -4,7 +4,7 @@ use input_event::{Event, KeyboardEvent, PointerEvent};
 use serde::{Deserialize, Serialize};
 
 /// Version du protocole, incrémentée à chaque changement incompatible.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// Taille maximale d'un texte de presse-papier synchronisé (512 Kio).
 pub const MAX_CLIPBOARD_LEN: usize = 512 * 1024;
@@ -55,7 +55,16 @@ pub enum Message {
     /// deux réglages incohérents sont harmonisés.
     Side(u8),
     /// Début d'un fichier envoyé : chemin relatif (« dossier/fichier.txt »).
-    FileStart { id: u32, path: String, size: u64 },
+    /// `batch` : fait partie d'un lot destiné au presse-papier.
+    FileStart {
+        id: u32,
+        path: String,
+        size: u64,
+        batch: Option<u32>,
+    },
+    /// Lot de `count` fichiers copiés (ou une image si `image`) : une fois tous
+    /// reçus, ils sont mis dans le presse-papier de ce PC.
+    ClipboardBatch { batch: u32, count: u32, image: bool },
     /// Morceau d'un fichier.
     FileChunk { id: u32, data: Vec<u8> },
     /// Fichier complet.

@@ -116,9 +116,68 @@ pub async fn send_path(path: PathBuf, first_id: u32, out: mpsc::Sender<Message>)
     let files = tokio::task::spawn_blocking(move || expand(&path))
         .await
         .unwrap_or_default();
+    send_files(files, first_id, None, &out).await;
+}
+
+/// Taille maximale d'une copie de fichiers envoyée par le presse-papier : au-delà,
+/// glisser les fichiers sur la fenêtre (évite d'envoyer un énorme dossier copié
+/// par mégarde).
+const MAX_CLIPBOARD_FILES: u64 = 1 << 30;
+
+/// Envoie des fichiers copiés (ou une image, `image`) pour le presse-papier de
+/// l'autre PC : un en-tête de lot, puis les fichiers.
+pub async fn send_clipboard(
+    items: Vec<PathBuf>,
+    batch: u32,
+    image: bool,
+    first_id: u32,
+    out: mpsc::Sender<Message>,
+) {
+    let expanded = items.clone();
+    let files: Vec<(PathBuf, String)> = tokio::task::spawn_blocking(move || {
+        expanded.iter().flat_map(|item| expand(item)).collect()
+    })
+    .await
+    .unwrap_or_default();
+    let total: u64 = files
+        .iter()
+        .filter_map(|(path, _)| std::fs::metadata(path).ok())
+        .map(|m| m.len())
+        .sum();
+    if total > MAX_CLIPBOARD_FILES {
+        log::warn!(
+            "copie de {} non envoyée par le presse-papier (plus de {}) : glissez ces fichiers \
+             sur la fenêtre one-mouse",
+            human_size(total),
+            human_size(MAX_CLIPBOARD_FILES)
+        );
+    } else if !files.is_empty() {
+        let header = Message::ClipboardBatch {
+            batch,
+            count: files.len() as u32,
+            image,
+        };
+        if out.send(header).await.is_ok() {
+            send_files(files, first_id, Some(batch), &out).await;
+        }
+    }
+    if image {
+        // Image écrite dans un fichier temporaire pour l'envoi.
+        for item in items {
+            let _ = std::fs::remove_file(item);
+        }
+    }
+}
+
+async fn send_files(
+    files: Vec<(PathBuf, String)>,
+    first_id: u32,
+    batch: Option<u32>,
+    out: &mpsc::Sender<Message>,
+) {
     for (index, (file, rel)) in files.into_iter().enumerate() {
         let id = first_id.wrapping_add(index as u32);
-        if let Err(e) = send_file(&file, &rel, id, &out).await {
+        if let Err(e) = send_file(&file, &rel, id, batch, out).await {
             log::warn!("envoi de « {rel} » impossible : {e:#}");
             status::emit_file(&FileStatus {
                 direction: FileDirection::Sending,
@@ -130,7 +189,13 @@ pub async fn send_path(path: PathBuf, first_id: u32, out: mpsc::Sender<Message>)
     }
 }
 
-async fn send_file(file: &Path, rel: &str, id: u32, out: &mpsc::Sender<Message>) -> Result<()> {
+async fn send_file(
+    file: &Path,
+    rel: &str,
+    id: u32,
+    batch: Option<u32>,
+    out: &mpsc::Sender<Message>,
+) -> Result<()> {
     let mut source = tokio::fs::File::open(file)
         .await
         .with_context(|| format!("lecture de {} impossible", file.display()))?;
@@ -140,6 +205,7 @@ async fn send_file(file: &Path, rel: &str, id: u32, out: &mpsc::Sender<Message>)
         id,
         path: rel.to_owned(),
         size,
+        batch,
     })
     .await
     .map_err(|_| closed())?;
@@ -228,19 +294,61 @@ struct Partial {
     file: std::fs::File,
     path: PathBuf,
     progress: Progress,
+    /// Lot du presse-papier auquel il appartient.
+    batch: Option<u32>,
+}
+
+/// Lot destiné au presse-papier, en cours de réception.
+struct Batch {
+    id: u32,
+    dir: PathBuf,
+    remaining: u32,
+    image: bool,
+    /// Éléments copiés (fichiers ou dossiers du premier niveau).
+    items: std::collections::BTreeSet<PathBuf>,
 }
 
 /// Fichiers en cours de réception.
 #[derive(Default)]
 pub struct Incoming {
     files: HashMap<u32, Partial>,
+    batch: Option<Batch>,
 }
 
 impl Incoming {
-    pub fn start(&mut self, id: u32, path: &str, size: u64) {
+    /// Un lot pour le presse-papier commence : ses fichiers vont dans un dossier
+    /// à lui, « Téléchargements/one-mouse/Presse-papier/… ».
+    pub fn start_batch(&mut self, id: u32, count: u32, image: bool) {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or_default();
+        let dir = received_dir()
+            .join("Presse-papier")
+            .join(format!("{stamp}-{id}"));
+        self.batch = Some(Batch {
+            id,
+            dir,
+            remaining: count,
+            image,
+            items: Default::default(),
+        });
+    }
+
+    pub fn start(&mut self, id: u32, path: &str, size: u64, batch: Option<u32>) {
+        let base = match (&mut self.batch, batch) {
+            (Some(current), Some(b)) if current.id == b => current.dir.clone(),
+            _ => received_dir(),
+        };
         let result = (|| -> Result<Partial> {
             let rel = sanitize(path).context("nom de fichier invalide")?;
-            let target = free_path(received_dir().join(rel));
+            if let (Some(current), Some(b)) = (&mut self.batch, batch)
+                && current.id == b
+                && let Some(first) = rel.components().next()
+            {
+                current.items.insert(current.dir.join(first));
+            }
+            let target = free_path(base.join(rel));
             if let Some(parent) = target.parent() {
                 std::fs::create_dir_all(parent)?;
             }
@@ -257,6 +365,7 @@ impl Incoming {
                 file,
                 path: target,
                 progress,
+                batch,
             })
         })();
         match result {
@@ -279,11 +388,36 @@ impl Incoming {
         partial.progress.add(data.len() as u64);
     }
 
-    pub fn end(&mut self, id: u32) {
-        if let Some(partial) = self.files.remove(&id) {
-            let _ = partial.file.sync_all();
-            partial.progress.done();
-            log::info!("fichier reçu : {}", partial.path.display());
+    /// Fichier complet. Renvoie le contenu à mettre dans le presse-papier quand
+    /// c'était le dernier fichier d'un lot.
+    pub fn end(&mut self, id: u32) -> Option<crate::clipboard::Clip> {
+        let partial = self.files.remove(&id)?;
+        let _ = partial.file.sync_all();
+        partial.progress.done();
+        log::info!("fichier reçu : {}", partial.path.display());
+        let batch = self
+            .batch
+            .as_mut()
+            .filter(|b| Some(b.id) == partial.batch)?;
+        batch.remaining = batch.remaining.saturating_sub(1);
+        if batch.remaining > 0 {
+            return None;
+        }
+        let batch = self.batch.take()?;
+        if batch.image {
+            // Image : remise dans le presse-papier, fichier temporaire supprimé.
+            let clip = std::fs::read(&partial.path)
+                .ok()
+                .and_then(|png| crate::clipboard::decode_png(&png).ok());
+            let _ = std::fs::remove_file(&partial.path);
+            let _ = std::fs::remove_dir(&batch.dir);
+            log::info!("image copiée sur l'autre PC : collez-la ici avec Ctrl+V");
+            clip
+        } else {
+            log::info!("fichiers copiés sur l'autre PC : collez-les ici avec Ctrl+V");
+            Some(crate::clipboard::Clip::Files(
+                batch.items.into_iter().collect(),
+            ))
         }
     }
 

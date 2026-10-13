@@ -447,9 +447,10 @@ async fn event_loop(
                 next_file_id = next_file_id.wrapping_add(1 << 16);
                 tokio::spawn(crate::transfer::send_path(path, id, files_out.clone()));
             }
-            Some(text) = recv_clipboard(&mut local.clipboard) => {
-                log::debug!("presse-papier local modifié ({} octets), envoi", text.len());
-                send(out, Message::Clipboard(text)).await?;
+            Some(clip) = recv_clipboard(&mut local.clipboard) => {
+                let batch = next_file_id;
+                next_file_id = next_file_id.wrapping_add(1 << 16);
+                send_clip(clip, batch, files_out.clone(), out).await?;
             }
             _ = ping.tick() => send(out, Message::Ping).await?,
         }
@@ -865,7 +866,59 @@ async fn recv_path(
     }
 }
 
-async fn recv_clipboard(clipboard: &mut Option<ClipboardSync>) -> Option<String> {
+/// Envoie un contenu copié localement : le texte directement, les images et les
+/// fichiers par la file des fichiers (ils sont mis dans le presse-papier de
+/// l'autre PC une fois tous reçus).
+async fn send_clip(
+    clip: crate::clipboard::Clip,
+    batch: u32,
+    files: mpsc::Sender<Message>,
+    out: &mpsc::Sender<Message>,
+) -> Result<()> {
+    use crate::clipboard::Clip;
+    match clip {
+        Clip::Text(text) => {
+            log::debug!("presse-papier local modifié ({} octets), envoi", text.len());
+            send(out, Message::Clipboard(text)).await?;
+        }
+        Clip::Files(items) => {
+            log::info!("fichiers copiés : envoi au presse-papier de l'autre PC");
+            tokio::spawn(crate::transfer::send_clipboard(
+                items, batch, false, batch, files,
+            ));
+        }
+        Clip::Image {
+            width,
+            height,
+            rgba,
+        } => {
+            tokio::spawn(async move {
+                let png = tokio::task::spawn_blocking(move || {
+                    let png = crate::clipboard::encode_png(width, height, &rgba)?;
+                    let path = std::env::temp_dir().join(format!(
+                        "one-mouse-image-{}-{batch}.png",
+                        std::process::id()
+                    ));
+                    std::fs::write(&path, png)?;
+                    anyhow::Ok(path)
+                })
+                .await;
+                match png {
+                    Ok(Ok(path)) => {
+                        log::info!("image copiée : envoi au presse-papier de l'autre PC");
+                        crate::transfer::send_clipboard(vec![path], batch, true, batch, files)
+                            .await;
+                    }
+                    Ok(Err(e)) => log::warn!("image du presse-papier non envoyée : {e:#}"),
+                    Err(e) => log::warn!("image du presse-papier non envoyée : {e}"),
+                }
+            });
+        }
+    }
+    Ok(())
+}
+
+async fn recv_clipboard(clipboard: &mut Option<ClipboardSync>) -> Option<crate::clipboard::Clip> {
     match clipboard {
         Some(c) => c.changes.recv().await,
         None => std::future::pending().await,
@@ -1014,7 +1067,7 @@ async fn on_message(
             if let Some(clipboard) = &local.clipboard
                 && text.len() <= MAX_CLIPBOARD_LEN
             {
-                clipboard.set(text);
+                clipboard.set(crate::clipboard::Clip::Text(text));
             }
         }
         Message::Audio {
@@ -1074,9 +1127,25 @@ async fn on_message(
                 }
             }
         }
-        Message::FileStart { id, path, size } => state.incoming.start(id, &path, size),
+        Message::ClipboardBatch {
+            batch,
+            count,
+            image,
+        } => state.incoming.start_batch(batch, count, image),
+        Message::FileStart {
+            id,
+            path,
+            size,
+            batch,
+        } => state.incoming.start(id, &path, size, batch),
         Message::FileChunk { id, data } => state.incoming.chunk(id, &data),
-        Message::FileEnd { id } => state.incoming.end(id),
+        Message::FileEnd { id } => {
+            if let Some(clip) = state.incoming.end(id)
+                && let Some(clipboard) = &local.clipboard
+            {
+                clipboard.set(clip);
+            }
+        }
         Message::Side(code) => {
             let Some(expected) = mirrored_side(code) else {
                 return Ok(());
