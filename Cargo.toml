@@ -30,7 +30,7 @@ languages = ["French", "English"]
 
 [package.metadata.packager.deb]
 section = "utils"
-depends = ["libx11-6", "libxtst6", "libxi6", "libasound2", "libxkbcommon-x11-0", "libgl1"]
+depends = ["libx11-6", "libxtst6", "libxi6", "libxfixes3", "libasound2", "libxkbcommon-x11-0", "libgl1"]
 
 [dependencies]
 anyhow = "1"
@@ -64,7 +64,7 @@ cpal = { version = "0.18.2", features = ["pulseaudio"] }
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 input-capture = "0.4.0"
 libc = "0.2"
-x11 = { version = "2.21", features = ["xlib", "xinput"] }
+x11 = { version = "2.21", features = ["xlib", "xinput", "xfixes"] }
 input-emulation = "0.4.0"
 input-event = "0.4.0"
 

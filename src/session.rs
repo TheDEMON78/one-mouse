@@ -307,9 +307,12 @@ async fn event_loop(
     let mut probe = tokio::time::interval(PROBE_INTERVAL);
     let mut datagram = vec![0u8; 65_536];
     let mut defaults = audio::watch_defaults();
+    // Un seul curseur visible : caché ici quand la souris est sur l'autre écran.
+    let mut cursor = crate::cursor::CursorHider::new();
 
     loop {
         audio.sync(&local.audio, &state);
+        cursor.set_hidden(cursor_hidden(&state));
         tokio::select! {
             event = next_capture(&mut local.capture) => {
                 let Some(event) = event else { bail!("la capture des entrées s'est arrêtée") };
@@ -830,6 +833,13 @@ async fn on_capture(
     Ok(())
 }
 
+/// Le curseur de ce PC doit-il être caché ? Oui quand ce PC contrôle l'autre
+/// (la souris est sur l'autre écran), et quand l'autre PC, qui l'a contrôlé en
+/// dernier, a repris sa souris : seul le curseur du PC utilisé reste visible.
+fn cursor_hidden(state: &State) -> bool {
+    state.sending || (!state.receiving && state.we_controlled_last == Some(false))
+}
+
 /// L'instant est-il assez récent pour qu'un passage inverse soit un rebond ?
 fn recent(at: Option<Instant>) -> bool {
     at.is_some_and(|at| at.elapsed() < EDGE_COOLDOWN)
@@ -1124,6 +1134,26 @@ mod tests {
             audio_directions(&cfg, &state(false, false, false)),
             (false, false)
         );
+    }
+
+    #[test]
+    fn only_the_cursor_in_use_is_visible() {
+        let mut st = state(false, false, false);
+        // Avant toute prise de main : curseur visible.
+        assert!(!cursor_hidden(&st));
+        // Ce PC contrôle l'autre : son curseur est caché.
+        st.sending = true;
+        note_controller(&mut st, true);
+        assert!(cursor_hidden(&st));
+        // Revenu chez lui : visible.
+        st.sending = false;
+        assert!(!cursor_hidden(&st));
+        // Côté contrôlé : visible pendant le contrôle, caché après le départ.
+        let mut st = state(false, false, true);
+        note_controller(&mut st, false);
+        assert!(!cursor_hidden(&st));
+        st.receiving = false;
+        assert!(cursor_hidden(&st));
     }
 
     #[test]

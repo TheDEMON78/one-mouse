@@ -14,6 +14,7 @@ mod capture;
 mod clipboard;
 mod codec;
 mod crypto;
+mod cursor;
 mod default_mic;
 mod default_output;
 mod discovery;
@@ -163,6 +164,8 @@ fn main() -> Result<()> {
     if cli.status {
         status::enable();
     }
+    // Curseurs laissés cachés par un arrêt brutal précédent : rétablis.
+    cursor::restore_at_startup();
     let result = block_on(run(cli, mode)).and_then(|r| r);
     if let Err(e) = &result {
         status::emit(Status::Error(format!("{e:#}")));

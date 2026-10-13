@@ -322,14 +322,17 @@ impl App {
     fn stop(&mut self) {
         if let Some(mut engine) = self.engine.take() {
             engine.stop();
+            // Curseur laissé caché par un moteur arrêté de force : rétabli.
+            crate::cursor::restore_at_startup();
         }
         self.shared.lock().expect("verrou").status = None;
     }
 
     fn running(&mut self) -> bool {
         let running = self.engine.as_mut().is_some_and(Engine::is_running);
-        if !running {
-            self.engine = None;
+        if !running && self.engine.take().is_some() {
+            // Moteur arrêté (erreur, plantage) : curseur rétabli s'il était caché.
+            crate::cursor::restore_at_startup();
         }
         running
     }
