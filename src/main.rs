@@ -26,6 +26,7 @@ mod session;
 mod settings;
 mod status;
 mod tray;
+mod update;
 
 use std::time::Duration;
 

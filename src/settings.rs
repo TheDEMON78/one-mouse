@@ -81,6 +81,8 @@ pub struct Settings {
     pub bluetooth: bool,
     /// Windows : fermer la fenêtre la garde dans la zone de notification.
     pub tray: bool,
+    /// Installer seul les nouvelles versions.
+    pub auto_update: bool,
     /// Version du format, pour adapter les anciens réglages (absent = ancien format 0).
     #[serde(default)]
     pub format: u32,
@@ -109,6 +111,7 @@ impl Default for Settings {
             start_sharing: false,
             bluetooth: false,
             tray: true,
+            auto_update: true,
             format: FORMAT,
         }
     }

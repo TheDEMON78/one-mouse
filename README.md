@@ -35,6 +35,7 @@ Ce n'est **pas** du bureau à distance : aucune image n'est transmise, chaque PC
 - 🎯 **Vitesse de la souris réglable** sur l'autre PC, si les deux n'ont pas la même sensibilité.
 - 🔒 **Connexion chiffrée** par mot de passe (Argon2id, ChaCha20-Poly1305).
 - 🔎 **Découverte automatique** : les deux PC se trouvent seuls sur le réseau local, sans adresse à saisir.
+- 🔄 **Mises à jour automatiques** : chaque nouvelle version s'installe seule, les deux PC restent à la même version.
 - 📶 **Par le réseau ou par Bluetooth** : câble ou Wi-Fi (recommandé), ou liaison Bluetooth directe entre les deux PC.
 - 🪟 **Reste dans la barre des tâches** (Windows) : fermer la fenêtre garde one-mouse près de l'horloge.
 - 🚀 **Démarrage automatique** à l'ouverture de session, partage lancé tout seul.
@@ -51,6 +52,15 @@ installez **la même version sur les deux PC** :
 | macOS Apple Silicon (M1, M2…) | `one-mouse_X.Y.Z_aarch64.dmg` |
 | macOS Intel | `one-mouse_X.Y.Z_x64.dmg` |
 | Linux | `.deb` (Debian, Ubuntu…) ou `.AppImage` |
+
+## Mises à jour
+
+one-mouse vérifie les nouvelles versions au démarrage puis toutes les 6 heures (onglet Options → Mises à jour).
+
+- **Windows** et **Linux (AppImage)** : la nouvelle version est téléchargée, son empreinte SHA-256 vérifiée, puis elle
+  est installée dès que la souris ne contrôle aucun PC ; one-mouse redémarre seul (et relance le partage si l'option
+  est cochée). Laissez l'option activée sur les deux PC : ils gardent toujours la même version.
+- **macOS** et **Linux (.deb)** : la fenêtre signale la nouvelle version et ouvre sa page de téléchargement.
 
 ## Démarrage rapide
 

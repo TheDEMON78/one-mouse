@@ -220,12 +220,17 @@ struct App {
     hide_after_frames: Option<u8>,
     /// Fermeture voulue (menu « Quitter ») : ne pas cacher la fenêtre.
     quitting: bool,
+    /// Vérification et installation des nouvelles versions.
+    updater: crate::update::Updater,
+    /// Installation demandée à la main (bouton).
+    install_requested: bool,
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, hidden: bool) -> Self {
         apply_theme(&cc.egui_ctx);
         let settings = Settings::load();
+        let settings_auto_update = settings.auto_update;
         let logo = {
             let image = image::load_from_memory(ICON_PNG)
                 .expect("icône intégrée valide")
@@ -255,6 +260,11 @@ impl App {
             tray: Tray::new(cc, ICON_PNG),
             hide_after_frames: None,
             quitting: false,
+            updater: {
+                let ctx = cc.egui_ctx.clone();
+                crate::update::Updater::start(settings_auto_update, move || ctx.request_repaint())
+            },
+            install_requested: false,
         };
         if hidden && app.tray.is_some() {
             // eframe montre la fenêtre après sa première image : on la cache ensuite.
@@ -772,6 +782,112 @@ impl App {
         }
     }
 
+    /// Installe une mise à jour prête : seule (option) quand la souris ne contrôle
+    /// aucun PC, ou à la demande. one-mouse se ferme, l'installateur le relance.
+    fn handle_update(&mut self, ctx: &egui::Context) {
+        if !matches!(self.updater.state(), crate::update::UpdateState::Ready(_)) {
+            return;
+        }
+        let busy = matches!(
+            self.shared.lock().expect("verrou").status,
+            Some(Status::Sending | Status::Receiving)
+        );
+        if !(self.install_requested || self.settings.auto_update && !busy) {
+            return;
+        }
+        let Some(prepared) = self.updater.take_ready() else {
+            return;
+        };
+        self.install_requested = false;
+        self.stop();
+        match crate::update::launch(prepared) {
+            Ok(()) => {
+                log::info!("installation de la mise à jour, one-mouse va redémarrer");
+                self.quitting = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Err(e) => self.error = Some(format!("Mise à jour : {e:#}")),
+        }
+    }
+
+    /// Carte « Mises à jour » de l'onglet Options.
+    fn update_card(&mut self, ui: &mut egui::Ui) {
+        use crate::update::UpdateState;
+        card(ui, |ui| {
+            section_title(ui, "Mises à jour");
+            ui.label(
+                egui::RichText::new(format!(
+                    "Version installée : {}",
+                    crate::update::current_version()
+                ))
+                .color(MUTED),
+            );
+            let (color, text) = match self.updater.state() {
+                UpdateState::Checking => (MUTED, "Recherche d'une nouvelle version…".to_owned()),
+                UpdateState::UpToDate => (GREEN, "one-mouse est à jour.".to_owned()),
+                UpdateState::Available(release) if release.automatic() => {
+                    (ORANGE, format!("Version {} disponible.", release.version))
+                }
+                UpdateState::Available(release) => (
+                    ORANGE,
+                    format!(
+                        "Version {} disponible : téléchargez-la (pas d'installation automatique \
+                         sur ce système).",
+                        release.version
+                    ),
+                ),
+                UpdateState::Downloading(version) => {
+                    (MUTED, format!("Téléchargement de la version {version}…"))
+                }
+                UpdateState::Ready(version) => {
+                    (GREEN, format!("Version {version} prête à être installée."))
+                }
+                UpdateState::Failed(error) => (RED, format!("Mise à jour impossible : {error}")),
+            };
+            ui.label(egui::RichText::new(text).color(color));
+            if ui
+                .checkbox(
+                    &mut self.settings.auto_update,
+                    "Installer les nouvelles versions automatiquement",
+                )
+                .on_hover_text(
+                    "Dès qu'une version sort, elle est téléchargée puis installée quand la souris \
+                     ne contrôle aucun PC (le partage redémarre seul). Gardez-le sur les deux PC : \
+                     ils ont ainsi toujours la même version.",
+                )
+                .changed()
+            {
+                self.updater.set_auto(self.settings.auto_update);
+                self.saved.auto_update = self.settings.auto_update;
+                if let Err(e) = self.saved.save() {
+                    self.error = Some(format!("Enregistrement des réglages impossible : {e:#}"));
+                }
+            }
+            ui.horizontal(|ui| {
+                if ui.button("Vérifier maintenant").clicked() {
+                    self.updater.check_now();
+                }
+                match self.updater.state() {
+                    UpdateState::Available(release) if release.automatic() => {
+                        if ui.button("Télécharger et installer").clicked() {
+                            self.install_requested = true;
+                            self.updater.download_now();
+                        }
+                    }
+                    UpdateState::Available(release) => {
+                        if ui.button("Ouvrir la page de téléchargement").clicked() {
+                            open_url(&release.page);
+                        }
+                    }
+                    UpdateState::Ready(_) if ui.button("Installer maintenant").clicked() => {
+                        self.install_requested = true;
+                    }
+                    _ => {}
+                }
+            });
+        });
+    }
+
     fn options_tab(&mut self, ui: &mut egui::Ui, running: bool) {
         ui.add_enabled_ui(!running, |ui| {
             let s = &mut self.settings;
@@ -784,6 +900,7 @@ impl App {
                 );
             });
         });
+        self.update_card(ui);
         card(ui, |ui| {
             section_title(ui, "Démarrage");
             let mut autostart = self.autostart;
@@ -1343,6 +1460,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.handle_tray(&ctx);
+        self.handle_update(&ctx);
         let running = self.running();
         if running {
             // L'état change sans action de l'utilisateur : rafraîchissement régulier.
