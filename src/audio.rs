@@ -434,6 +434,13 @@ fn system_loopback(host: &Host) -> Result<(Device, SupportedStreamConfig)> {
     Ok((device, config))
 }
 
+/// Flux de capture ouvert.
+enum Running {
+    Cpal(cpal::Stream),
+    #[cfg(target_os = "linux")]
+    Pulse(crate::pulse_capture::PulseCapture),
+}
+
 /// Capture audio en cours. S'arrête quand l'objet est détruit.
 pub struct AudioCapture {
     pub frames: mpsc::Receiver<AudioFrame>,
@@ -465,16 +472,34 @@ impl AudioCapture {
                         (Source::Microphone, None) => default_id(host.default_input_device()),
                     };
                     let (device, config) = capture_device(&host, source, device.as_deref())?;
-                    let stream = build_input(&device, &config, frames_tx, flag)?;
+                    let label = device_label(&device);
+                    // Linux : flux ouvert par libpulse, plus régulier (voir `pulse_capture`).
+                    #[cfg(target_os = "linux")]
+                    if host.id() == cpal::HostId::PulseAudio {
+                        let capture = crate::pulse_capture::PulseCapture::open(
+                            &id_string(&device),
+                            config.sample_rate(),
+                            config.channels(),
+                            FRAME_MS,
+                        )?;
+                        return Ok((Running::Pulse(capture), label, default_id));
+                    }
+                    let stream = build_input(&device, &config, frames_tx.clone(), flag.clone())?;
                     stream.play()?;
-                    Ok((stream, device_label(&device), default_id))
+                    Ok((Running::Cpal(stream), label, default_id))
                 })();
                 match started {
-                    Ok((stream, label, default_id)) => {
+                    Ok((running, label, default_id)) => {
                         let _ = ready_tx.send(Ok((label, default_id)));
-                        // Attend l'arrêt (message ou destruction de `Capture`).
-                        let _ = stop_rx.recv();
-                        drop(stream);
+                        match running {
+                            #[cfg(target_os = "linux")]
+                            Running::Pulse(capture) => capture.run(frames_tx, stop_rx, flag),
+                            Running::Cpal(stream) => {
+                                // Attend l'arrêt (message ou destruction de `Capture`).
+                                let _ = stop_rx.recv();
+                                drop(stream);
+                            }
+                        }
                     }
                     Err(e) => {
                         let _ = ready_tx.send(Err(e));

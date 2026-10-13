@@ -26,6 +26,8 @@ mod network;
 mod power;
 mod powershell;
 mod protocol;
+#[cfg(target_os = "linux")]
+mod pulse_capture;
 mod screens;
 mod session;
 mod settings;
