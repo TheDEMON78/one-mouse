@@ -4,7 +4,7 @@ use input_event::{Event, KeyboardEvent, PointerEvent};
 use serde::{Deserialize, Serialize};
 
 /// Version du protocole, incrémentée à chaque changement incompatible.
-pub const PROTOCOL_VERSION: u32 = 14;
+pub const PROTOCOL_VERSION: u32 = 15;
 
 /// Taille maximale d'un texte de presse-papier synchronisé (512 Kio).
 pub const MAX_CLIPBOARD_LEN: usize = 512 * 1024;
@@ -108,7 +108,7 @@ pub struct PeerInfo {
 /// Codage d'un paquet de son.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AudioFormat {
-    /// Flottants 32 bits little-endian entrelacés, sans perte.
+    /// Entiers 24 bits little-endian entrelacés, sans perte audible.
     Pcm,
     /// Trame Opus de 10 ms à 48 kHz.
     Opus,

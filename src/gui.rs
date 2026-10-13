@@ -1157,7 +1157,7 @@ impl App {
                     });
                 ui.label(
                     egui::RichText::new(
-                        "Parfaite : le son arrive exactement comme sur le PC d'origine. Économie : \
+                        "Parfaite : qualité studio, sans aucune perte audible. Économie : \
                          utilise six fois moins le réseau, si le son coupe en Wi-Fi.",
                     )
                     .small()

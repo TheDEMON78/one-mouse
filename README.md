@@ -39,7 +39,7 @@ Ce n'est **pas** du bureau à distance : aucune image n'est transmise, chaque PC
   zone « Déposer ici » apparaît sous le curseur. Lâchez-les dessus : ils arrivent sur l'autre PC dans
   « Téléchargements/one-mouse », s'y affichent dans l'explorateur (d'où on continue à les glisser où l'on veut) et
   sont dans son presse-papier (Ctrl+V). On peut aussi les glisser sur la fenêtre one-mouse.
-- 🔊 **Son de l'autre PC dans votre casque, en permanence**, sans perte (flottants 32 bits), en UDP chiffré.
+- 🔊 **Son de l'autre PC dans votre casque, en permanence**, en qualité studio (24 bits, sans perte audible), en UDP chiffré.
 - 🎙️ **Votre micro devient celui de l'autre PC** : Discord, Teams… l'utilisent sans réglage.
 - 🎯 **Vitesse de la souris réglable** sur l'autre PC, si les deux n'ont pas la même sensibilité.
 - 🔒 **Connexion chiffrée** par mot de passe (Argon2id, ChaCha20-Poly1305).
@@ -143,10 +143,11 @@ adresse.
   PC, son son vous parvient en permanence. Jamais d'écho : le son ne va que dans un sens, le micro dans l'autre.
 - **Toujours là** : si une capture ou une lecture s'interrompt (casque débranché, carte son réinitialisée), elle
   redémarre seule ; si vous changez de sortie ou de micro par défaut, one-mouse suit le nouveau périphérique.
-- **Qualité** : par défaut, son **sans perte** (~3 Mbit/s en stéréo), mesuré de bout en bout à 71,6 dB de rapport
+- **Qualité** : par défaut, son **sans perte audible**, en 24 bits (~4,6 Mbit/s en stéréo, copie de secours comprise), mesuré de bout en bout à 71,6 dB de rapport
   signal/bruit, sans coupure. Option « Compressé » (Opus 510 kbit/s, six fois moins de données) pour un Wi-Fi saturé.
-  - Le son passe en **UDP chiffré**, par paquets d'environ 1,5 ms qui transportent aussi le paquet précédent : une
-    perte isolée est réparée exactement, sans bloquer le flux. Repli automatique en TCP si l'UDP est bloqué.
+  - Le son passe en **UDP chiffré**, par paquets de 2 ms qui transportent aussi le paquet précédent : une perte
+    isolée est réparée exactement, sans bloquer le flux ; au-delà, le trou est comblé en prolongeant le son reçu
+    juste avant, période après période (méthode des téléphones numériques), sans grésillement. Repli automatique en TCP si l'UDP est bloqué.
   - Traitement : rééchantillonnage par sinc fenêtré, tampon adaptatif (qui ne grossit pas pendant les silences),
     fondus anti-clic, compensation de la dérive entre les cartes son.
 - **Casques 5.1 / 7.1** : vrai mixage multicanal. La stéréo va sur l'avant gauche et droite. En ramenant du 5.1/7.1 en

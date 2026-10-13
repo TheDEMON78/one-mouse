@@ -1,7 +1,8 @@
 //! Mise en paquets du son pour le réseau, en deux qualités :
 //!
-//! - **Sans perte** (par défaut) : flottants 32 bits, tels que capturés, en
-//!   paquets de 2,5 ms (un datagramme UDP chacun, sans fragmentation). Chaque
+//! - **Sans perte** (par défaut) : entiers 24 bits (qualité studio, 138 dB
+//!   de dynamique avec une marge de 6 dB au-dessus du maximum), en paquets de
+//!   2 ms (un datagramme UDP chacun, sans fragmentation). Chaque
 //!   paquet transporte aussi le précédent ; si les deux sont perdus, le trou est
 //!   comblé en prolongeant le son reçu juste avant, période après période.
 //! - **Compressé** : Opus (le codec de Discord, Zoom, WebRTC) à 510 kbit/s en
@@ -20,7 +21,7 @@ use crate::protocol::{AudioFormat, AudioKind};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Quality {
-    /// Son transmis sans perte (réseau local rapide, ~3 Mbit/s en stéréo).
+    /// Son transmis sans perte audible, 24 bits (réseau local, ~4,6 Mbit/s en stéréo).
     #[default]
     Lossless,
     /// Son compressé avec Opus (Wi-Fi faible, ~0,5 Mbit/s).
@@ -48,8 +49,13 @@ const MAX_OPUS_PACKET: usize = 4000;
 const PCM_CHUNK_US: u32 = 2_500;
 /// Taille maximale d'un paquet sans perte : avec la copie du paquet précédent
 /// (contre les pertes), un datagramme reste sous 1 200 octets, sans fragmentation
-/// IP (1,5 ms en stéréo 48 kHz).
+/// IP, même à travers un VPN (2 ms en stéréo 48 kHz).
 const PCM_MAX_BYTES: usize = 576;
+/// Octets par échantillon sans perte (24 bits).
+const PCM_SAMPLE_BYTES: usize = 3;
+/// Échelle des entiers 24 bits : ±2 représentables (6 dB de marge au-dessus du
+/// maximum, un mélange de sons peut le dépasser), pas de 2⁻²² (−132 dB).
+const PCM_SCALE: f32 = (1 << 22) as f32;
 /// Au-delà de ce nombre de paquets perdus d'affilée, on ne masque plus.
 const MAX_CONCEALED: u32 = 5;
 
@@ -176,13 +182,10 @@ impl AudioEncoder {
                 }
                 pending.extend(remix(&frame.samples, *source, *channels));
                 let frames = ((*rate as u64 * PCM_CHUNK_US as u64 / 1_000_000) as usize)
-                    .min(PCM_MAX_BYTES / (4 * (*channels).max(1)));
+                    .min(PCM_MAX_BYTES / (PCM_SAMPLE_BYTES * (*channels).max(1)));
                 let chunk = frames * *channels;
                 while chunk > 0 && pending.len() >= chunk {
-                    let data = pending[..chunk]
-                        .iter()
-                        .flat_map(|s| s.to_le_bytes())
-                        .collect();
+                    let data = pending[..chunk].iter().flat_map(|&s| pcm24(s)).collect();
                     pending.drain(..chunk);
                     out.push((AudioFormat::Pcm, *rate, *channels, data));
                 }
@@ -463,23 +466,30 @@ fn find_period(history: &[f32], channels: usize, rate: u32) -> usize {
     best.1
 }
 
-/// Échantillons d'un paquet sans perte (flottants 32 bits little-endian).
+/// Échantillons d'un paquet sans perte (entiers 24 bits little-endian).
 fn parse_pcm(data: &[u8], channels: usize) -> Result<Vec<f32>> {
     ensure!(
-        data.len().is_multiple_of(4 * channels),
+        data.len().is_multiple_of(PCM_SAMPLE_BYTES * channels),
         "paquet audio invalide"
     );
-    let samples: Vec<f32> = data
-        .as_chunks::<4>()
+    Ok(data
+        .as_chunks::<PCM_SAMPLE_BYTES>()
         .0
         .iter()
-        .map(|&b| f32::from_le_bytes(b))
-        .collect();
-    ensure!(
-        samples.iter().all(|s| s.is_finite()),
-        "paquet audio invalide"
-    );
-    Ok(samples)
+        .map(|&[a, b, c]| (i32::from_le_bytes([0, a, b, c]) >> 8) as f32 / PCM_SCALE)
+        .collect())
+}
+
+/// Échantillon en entier 24 bits little-endian.
+fn pcm24(sample: f32) -> [u8; PCM_SAMPLE_BYTES] {
+    let max = (1 << 23) - 1;
+    let value = if sample.is_finite() {
+        ((sample * PCM_SCALE).round() as i32).clamp(-max - 1, max)
+    } else {
+        0
+    };
+    let [a, b, c, _] = value.to_le_bytes();
+    [a, b, c]
 }
 
 #[cfg(test)]
@@ -597,8 +607,29 @@ mod tests {
         );
     }
 
+    /// Écart maximal du transport sans perte : un pas de l'échelle 24 bits.
+    fn assert_lossless(output: &[f32], input: &[f32]) {
+        assert!(!output.is_empty());
+        for (o, i) in output.iter().zip(input) {
+            assert!(
+                (o - i).abs() <= 0.5 / PCM_SCALE + f32::EPSILON,
+                "{o} au lieu de {i}"
+            );
+        }
+    }
+
     #[test]
-    fn lossless_is_bit_exact_and_fits_a_datagram() {
+    fn lossless_is_studio_quality() {
+        // Maximum dépassé (mélange de sons) : conservé grâce à la marge.
+        for v in [0.0, 1.0, -1.0, 0.123_456_7, 1.9, -1.99] {
+            let back = parse_pcm(&pcm24(v), 1).unwrap()[0];
+            assert!((back - v).abs() <= 0.5 / PCM_SCALE, "{v} -> {back}");
+        }
+        assert_eq!(parse_pcm(&pcm24(f32::NAN), 1).unwrap()[0], 0.0);
+    }
+
+    #[test]
+    fn lossless_is_exact_and_fits_a_datagram() {
         let mut enc = AudioEncoder::new(AudioKind::Sound, Quality::Lossless).unwrap();
         let mut dec = AudioDecoder::new(AudioFormat::Pcm, 2).unwrap();
         let input = sine(1000.0, 0, 4410, 44_100, 2);
@@ -619,7 +650,7 @@ mod tests {
             assert!(datagram <= 1200, "datagramme de {datagram} octets");
             output.extend(dec.decode(p.seq, p.rate, &p.data).unwrap().unwrap().samples);
         }
-        assert_eq!(output, input.samples[..output.len()]);
+        assert_lossless(&output, &input.samples);
         assert!(output.len() >= input.samples.len() - 2 * 110);
     }
 
@@ -639,11 +670,9 @@ mod tests {
             let frame = dec.decode_with(p.seq, p.rate, &p.data, previous).unwrap();
             output.extend(frame.unwrap().samples);
         }
-        assert_eq!(
-            output,
-            input.samples[..output.len()],
-            "son identique, sans trou"
-        );
+        // Son identique, sans trou.
+        assert_lossless(&output, &input.samples);
+        assert_eq!(output.len(), packets.len() * packets[0].data.len() / 3);
     }
 
     #[test]
@@ -691,7 +720,7 @@ mod tests {
         }
         // Rien ne manque, et pas de saut : différence seconde d'un sinus de 1 kHz
         // d'amplitude 0,5 de 0,0086 au plus (une répétition brute donnait 0,13).
-        assert_eq!(out.len(), packets.len() * packets[0].data.len() / 4);
+        assert_eq!(out.len(), packets.len() * packets[0].data.len() / 3);
         let worst = out
             .windows(3)
             .map(|w| (w[0] - 2.0 * w[1] + w[2]).abs())
