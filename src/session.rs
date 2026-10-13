@@ -81,6 +81,10 @@ struct State {
     side_authority: bool,
     /// Fichiers en cours de réception.
     incoming: crate::transfer::Incoming,
+    /// Liaison lente (Bluetooth) : mouvements de souris regroupés.
+    coalesce_motion: bool,
+    /// Mouvement accumulé, pas encore envoyé (pixels entiers).
+    pending_motion: (f64, f64),
     /// Dernière prise de main par l'autre PC / dernier retour du curseur ici :
     /// un passage en sens inverse juste après est ignoré (anti-rebond).
     entered_at: Option<Instant>,
@@ -100,6 +104,11 @@ struct Link {
 
 /// Paquets de son en attente au plus sur la connexion (~100 ms en Opus).
 const STREAM_AUDIO_QUEUE: usize = 10;
+
+/// En Bluetooth, intervalle d'envoi des mouvements de souris regroupés (125 par
+/// seconde, comme une souris classique) : une souris à 1 000 Hz saturerait la
+/// liaison, d'où des à-coups.
+const MOTION_FLUSH: Duration = Duration::from_millis(8);
 
 /// Durée pendant laquelle un passage en sens inverse est ignoré.
 const EDGE_COOLDOWN: Duration = Duration::from_millis(300);
@@ -305,6 +314,7 @@ async fn event_loop(
         peer_main: peer.main,
         pointer_speed: local.pointer_speed,
         side_authority,
+        coalesce_motion: via_bluetooth,
         ..State::default()
     };
     if local.audio.main && state.peer_main {
@@ -316,6 +326,8 @@ async fn event_loop(
     let mut audio = AudioState::default();
     let mut ping = tokio::time::interval(PING_INTERVAL);
     let mut probe = tokio::time::interval(PROBE_INTERVAL);
+    let mut motion_flush = tokio::time::interval(MOTION_FLUSH);
+    motion_flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut datagram = vec![0u8; 65_536];
     let mut defaults = audio::watch_defaults();
     // Un seul curseur visible : caché ici quand la souris est sur l'autre écran.
@@ -366,6 +378,9 @@ async fn event_loop(
                 }
             }
             _ = probe.tick() => udp.probe(),
+            _ = motion_flush.tick(), if state.pending_motion != (0.0, 0.0) => {
+                flush_motion(&mut state, out).await?;
+            }
             Ok(()) = defaults.changed() => {
                 let now = defaults.borrow_and_update().clone();
                 audio.follow_defaults(&now, &local.audio);
@@ -853,6 +868,16 @@ async fn on_capture(
             let Some(event) = scale_motion(state, event) else {
                 return Ok(());
             };
+            if state.coalesce_motion {
+                if let Event::Pointer(PointerEvent::Motion { dx, dy, .. }) = event {
+                    // Liaison lente : regroupé et envoyé toutes les 8 ms.
+                    state.pending_motion.0 += dx;
+                    state.pending_motion.1 += dy;
+                    return Ok(());
+                }
+                // Clic, touche… : après les mouvements en attente, dans l'ordre.
+                flush_motion(state, out).await?;
+            }
             send(out, Message::Input(event.into())).await?;
         }
     }
@@ -864,6 +889,16 @@ async fn on_capture(
 /// dernier, a repris sa souris : seul le curseur du PC utilisé reste visible.
 fn cursor_hidden(state: &State) -> bool {
     state.sending || (!state.receiving && state.we_controlled_last == Some(false))
+}
+
+/// Envoie le mouvement de souris accumulé (liaison lente).
+async fn flush_motion(state: &mut State, out: &mpsc::Sender<Message>) -> Result<()> {
+    let (dx, dy) = std::mem::take(&mut state.pending_motion);
+    if (dx, dy) != (0.0, 0.0) {
+        let motion = Event::Pointer(PointerEvent::Motion { time: 0, dx, dy });
+        send(out, Message::Input(motion.into())).await?;
+    }
+    Ok(())
 }
 
 /// L'instant est-il assez récent pour qu'un passage inverse soit un rebond ?
@@ -1035,6 +1070,8 @@ async fn stop_sending(
 ) -> Result<()> {
     state.sending = false;
     state.returned_at = Some(Instant::now());
+    // Mouvement pas encore envoyé : le curseur revient ici, il n'a plus lieu d'être.
+    state.pending_motion = (0.0, 0.0);
     status::emit(Status::Connected(state.peer_name.clone()));
     let pressed = capture.take_pressed_keys();
     capture.release().await?;
