@@ -102,12 +102,14 @@ saisissant l'adresse de l'autre PC. En ligne de commande : `--bluetooth`, et `co
   - L'onglet Connexion indique en direct le micro envoyé, et sur l'autre PC si le micro reçu est bien devenu le
     micro par défaut (sinon : quoi installer ou choisir).
   - Le PC principal n'envoie jamais un micro virtuel resté par défaut : il prend alors son vrai micro.
-- Sans PC principal, le son n'est envoyé que par le PC contrôlé, et le micro que par celui qui contrôle : un seul sens
-  à la fois, donc jamais d'écho.
+- Sans PC principal coché, le dernier PC à avoir pris la main en tient lieu : dès que vous passez une fois sur l'autre
+  PC, son son vous parvient en permanence. Jamais d'écho : le son ne va que dans un sens, le micro dans l'autre.
+- **Toujours là** : si une capture ou une lecture s'interrompt (casque débranché, carte son réinitialisée), elle
+  redémarre seule ; si vous changez de sortie ou de micro par défaut, one-mouse suit le nouveau périphérique.
 - **Qualité** : par défaut, son **sans perte** (~3 Mbit/s en stéréo), mesuré de bout en bout à 71,6 dB de rapport
   signal/bruit, sans coupure. Option « Compressé » (Opus 510 kbit/s, six fois moins de données) pour un Wi-Fi saturé.
-  - Le son passe en **UDP chiffré**, par paquets de 2,5 ms : un paquet perdu est comblé au lieu de bloquer le flux.
-    Repli automatique en TCP si l'UDP est bloqué.
+  - Le son passe en **UDP chiffré**, par paquets d'environ 1,5 ms qui transportent aussi le paquet précédent : une
+    perte isolée est réparée exactement, sans bloquer le flux. Repli automatique en TCP si l'UDP est bloqué.
   - Traitement : rééchantillonnage par sinc fenêtré, tampon adaptatif (qui ne grossit pas pendant les silences),
     fondus anti-clic, compensation de la dérive entre les cartes son.
 - **Casques 5.1 / 7.1** : vrai mixage multicanal. La stéréo va sur l'avant gauche et droite. En ramenant du 5.1/7.1 en

@@ -43,8 +43,12 @@ pub const OPUS_RATE: u32 = 48_000;
 const OPUS_FRAME: usize = 480;
 /// Taille maximale d'un paquet Opus.
 const MAX_OPUS_PACKET: usize = 4000;
-/// Durée d'un paquet sans perte (µs) : 2,5 ms tiennent dans un datagramme.
+/// Durée maximale d'un paquet sans perte (µs).
 const PCM_CHUNK_US: u32 = 2_500;
+/// Taille maximale d'un paquet sans perte : avec la copie du paquet précédent
+/// (contre les pertes), un datagramme reste sous 1 200 octets, sans fragmentation
+/// IP (1,5 ms en stéréo 48 kHz).
+const PCM_MAX_BYTES: usize = 576;
 /// Au-delà de ce nombre de paquets perdus d'affilée, on ne masque plus.
 const MAX_CONCEALED: u32 = 5;
 
@@ -170,7 +174,9 @@ impl AudioEncoder {
                     *channels = (*source).min(*max_channels);
                 }
                 pending.extend(remix(&frame.samples, *source, *channels));
-                let chunk = (*rate as u64 * PCM_CHUNK_US as u64 / 1_000_000) as usize * *channels;
+                let frames = ((*rate as u64 * PCM_CHUNK_US as u64 / 1_000_000) as usize)
+                    .min(PCM_MAX_BYTES / (4 * (*channels).max(1)));
+                let chunk = frames * *channels;
                 while chunk > 0 && pending.len() >= chunk {
                     let data = pending[..chunk]
                         .iter()
@@ -267,7 +273,20 @@ impl AudioDecoder {
 
     /// Décode un paquet ; comble les paquets manquants juste avant lui.
     /// Renvoie `None` pour un paquet en double ou en retard.
+    #[cfg(test)]
     pub fn decode(&mut self, seq: u32, rate: u32, data: &[u8]) -> Result<Option<AudioFrame>> {
+        self.decode_with(seq, rate, data, &[])
+    }
+
+    /// Décode le paquet `seq`. `previous` est la copie du paquet `seq - 1` qu'il
+    /// transporte (vide si aucune) : s'il manque, il est restitué tel quel.
+    pub fn decode_with(
+        &mut self,
+        seq: u32,
+        rate: u32,
+        data: &[u8],
+        previous: &[u8],
+    ) -> Result<Option<AudioFrame>> {
         let missing = match self.last_seq {
             Some(last) => {
                 let gap = seq.wrapping_sub(last);
@@ -284,26 +303,24 @@ impl AudioDecoder {
         match &mut self.inner {
             DecoderKind::Pcm { last } => {
                 ensure!(
-                    (8_000..=192_000).contains(&rate)
-                        && (1..=8).contains(&channels)
-                        && data.len().is_multiple_of(4 * channels),
+                    (8_000..=192_000).contains(&rate) && (1..=8).contains(&channels),
                     "paquet audio invalide"
                 );
-                let current: Vec<f32> = data
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .map(|&b| f32::from_le_bytes(b))
-                    .collect();
-                ensure!(
-                    current.iter().all(|s| s.is_finite()),
-                    "paquet audio invalide"
-                );
+                let current = parse_pcm(data, channels)?;
+                // Paquet précédent perdu mais transporté par celui-ci : restitué exactement.
+                let recovered = if conceal && !previous.is_empty() {
+                    parse_pcm(previous, channels).ok()
+                } else {
+                    None
+                };
                 let mut samples = Vec::with_capacity(current.len() * (missing as usize + 1));
-                if conceal && let Some(previous) = last.as_ref().filter(|p| p.rate == rate) {
-                    for _ in 0..missing {
-                        samples.extend_from_slice(&previous.samples);
+                if conceal && let Some(last) = last.as_ref().filter(|p| p.rate == rate) {
+                    for _ in 0..missing - u32::from(recovered.is_some()) {
+                        samples.extend_from_slice(&last.samples);
                     }
+                }
+                if let Some(recovered) = recovered {
+                    samples.extend(recovered);
                 }
                 samples.extend_from_slice(&current);
                 *last = Some(AudioFrame {
@@ -333,12 +350,15 @@ impl AudioDecoder {
                 };
                 let mut samples = Vec::new();
                 if conceal {
-                    // Le dernier paquet perdu est retrouvé grâce à la correction
-                    // d'erreurs portée par le paquet courant, les autres sont masqués.
+                    // Le dernier paquet perdu est restitué : copie transportée par le
+                    // paquet courant, sinon sa correction d'erreurs. Les autres sont masqués.
                     for _ in 1..missing {
                         samples.extend(run(&[], false)?);
                     }
-                    samples.extend(run(data, true)?);
+                    match previous.is_empty() {
+                        false => samples.extend(run(previous, false)?),
+                        true => samples.extend(run(data, true)?),
+                    }
                 }
                 samples.extend(run(data, false)?);
                 Ok(Some(AudioFrame {
@@ -349,6 +369,25 @@ impl AudioDecoder {
             }
         }
     }
+}
+
+/// Échantillons d'un paquet sans perte (flottants 32 bits little-endian).
+fn parse_pcm(data: &[u8], channels: usize) -> Result<Vec<f32>> {
+    ensure!(
+        data.len().is_multiple_of(4 * channels),
+        "paquet audio invalide"
+    );
+    let samples: Vec<f32> = data
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&b| f32::from_le_bytes(b))
+        .collect();
+    ensure!(
+        samples.iter().all(|s| s.is_finite()),
+        "paquet audio invalide"
+    );
+    Ok(samples)
 }
 
 #[cfg(test)]
@@ -473,15 +512,46 @@ mod tests {
         let input = sine(1000.0, 0, 4410, 44_100, 2);
         let mut output = Vec::new();
         for p in enc.push(&input).unwrap() {
-            assert!(
-                p.data.len() <= 1200,
-                "un datagramme sans fragmentation : {}",
-                p.data.len()
-            );
+            // Avec la copie du paquet précédent, le datagramme chiffré reste sous
+            // la taille d'un paquet IP (1 472 octets utiles) : pas de fragmentation.
+            let msg = crate::protocol::Message::Audio {
+                kind: AudioKind::Sound,
+                seq: p.seq,
+                format: p.format,
+                rate: p.rate,
+                channels: p.channels,
+                data: p.data.clone(),
+                previous: p.data.clone(),
+            };
+            let datagram = postcard::to_stdvec(&msg).unwrap().len() + 8 + 16;
+            assert!(datagram <= 1200, "datagramme de {datagram} octets");
             output.extend(dec.decode(p.seq, p.rate, &p.data).unwrap().unwrap().samples);
         }
         assert_eq!(output, input.samples[..output.len()]);
         assert!(output.len() >= input.samples.len() - 2 * 110);
+    }
+
+    #[test]
+    fn lost_packet_is_restored_exactly_from_the_next_one() {
+        let mut enc = AudioEncoder::new(AudioKind::Sound, Quality::Lossless).unwrap();
+        let mut dec = AudioDecoder::new(AudioFormat::Pcm, 2).unwrap();
+        let input = sine(1000.0, 0, 4800, 48_000, 2);
+        let packets = enc.push(&input).unwrap();
+        let mut output = Vec::new();
+        for (i, p) in packets.iter().enumerate() {
+            // Un paquet sur cinq perdu ; chacun transporte la copie du précédent.
+            if i % 5 == 3 {
+                continue;
+            }
+            let previous = if i > 0 { &packets[i - 1].data[..] } else { &[] };
+            let frame = dec.decode_with(p.seq, p.rate, &p.data, previous).unwrap();
+            output.extend(frame.unwrap().samples);
+        }
+        assert_eq!(
+            output,
+            input.samples[..output.len()],
+            "son identique, sans trou"
+        );
     }
 
     #[test]

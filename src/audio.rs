@@ -10,6 +10,7 @@
 //! son propre thread, arrêté quand l'objet Rust correspondant est détruit.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 
@@ -411,6 +412,10 @@ pub struct AudioCapture {
     pub frames: mpsc::Receiver<AudioFrame>,
     /// Nom du périphérique capturé.
     pub label: String,
+    /// Périphérique par défaut au démarrage (capture sans périphérique choisi) :
+    /// s'il change, la capture est relancée sur le nouveau.
+    pub default_id: Option<String>,
+    broken: Arc<AtomicBool>,
     _stop: std_mpsc::Sender<()>,
 }
 
@@ -419,20 +424,27 @@ impl AudioCapture {
         let device = device.map(str::to_owned);
         let (frames_tx, frames) = mpsc::channel(64);
         let (stop_tx, stop_rx) = std_mpsc::channel::<()>();
-        let (ready_tx, ready_rx) = std_mpsc::channel::<Result<String>>();
+        let (ready_tx, ready_rx) = std_mpsc::channel::<Result<(String, Option<String>)>>();
+        let broken = Arc::new(AtomicBool::new(false));
+        let flag = broken.clone();
         std::thread::Builder::new()
             .name("capture-audio".into())
             .spawn(move || {
                 let started = (|| {
                     let host = host();
+                    let default_id = match (source, &device) {
+                        (_, Some(_)) => None,
+                        (Source::System, None) => default_id(host.default_output_device()),
+                        (Source::Microphone, None) => default_id(host.default_input_device()),
+                    };
                     let (device, config) = capture_device(&host, source, device.as_deref())?;
-                    let stream = build_input(&device, &config, frames_tx)?;
+                    let stream = build_input(&device, &config, frames_tx, flag)?;
                     stream.play()?;
-                    Ok((stream, device_label(&device)))
+                    Ok((stream, device_label(&device), default_id))
                 })();
                 match started {
-                    Ok((stream, label)) => {
-                        let _ = ready_tx.send(Ok(label));
+                    Ok((stream, label, default_id)) => {
+                        let _ = ready_tx.send(Ok((label, default_id)));
                         // Attend l'arrêt (message ou destruction de `Capture`).
                         let _ = stop_rx.recv();
                         drop(stream);
@@ -442,15 +454,84 @@ impl AudioCapture {
                     }
                 }
             })?;
-        let label = ready_rx
+        let (label, default_id) = ready_rx
             .recv()
             .map_err(|_| anyhow!("le thread audio s'est arrêté"))??;
         log::info!("capture audio : {label}");
         Ok(Self {
             frames,
             label,
+            default_id,
+            broken,
             _stop: stop_tx,
         })
+    }
+
+    /// Le périphérique a disparu ou le flux est invalide : à relancer.
+    pub fn is_broken(&self) -> bool {
+        self.broken.load(Ordering::Relaxed)
+    }
+}
+
+/// Identifiant d'un périphérique (pour repérer un changement de périphérique par défaut).
+fn default_id(device: Option<Device>) -> Option<String> {
+    device.map(|d| id_string(&d)).filter(|id| !id.is_empty())
+}
+
+/// Périphériques par défaut du système (identifiants).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DefaultDevices {
+    pub output: Option<String>,
+    pub input: Option<String>,
+}
+
+/// Surveille les périphériques par défaut (vérifiés toutes les 2 s dans un thread,
+/// la requête pouvant prendre quelques millisecondes).
+pub fn watch_defaults() -> tokio::sync::watch::Receiver<DefaultDevices> {
+    let read = |host: &Host| DefaultDevices {
+        output: default_id(host.default_output_device()),
+        input: default_id(host.default_input_device()),
+    };
+    let (tx, rx) = tokio::sync::watch::channel(DefaultDevices::default());
+    let _ = std::thread::Builder::new()
+        .name("audio-defauts".into())
+        .spawn(move || {
+            // Une seule connexion au système audio pour toute la surveillance.
+            let host = host();
+            tx.send_replace(read(&host));
+            while !tx.is_closed() {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let now = read(&host);
+                tx.send_if_modified(|current| {
+                    let changed = *current != now;
+                    *current = now;
+                    changed
+                });
+            }
+        });
+    rx
+}
+
+/// Erreur de flux qui l'arrête pour de bon (périphérique débranché, flux
+/// invalidé…), par opposition à un simple craquement ou un changement de route
+/// déjà suivi par le système.
+fn is_fatal(error: &cpal::Error) -> bool {
+    use cpal::ErrorKind;
+    !matches!(
+        error.kind(),
+        ErrorKind::Xrun | ErrorKind::DeviceChanged | ErrorKind::RealtimeDenied
+    )
+}
+
+/// Rappel d'erreur d'un flux : journal, et signal de relance si l'erreur est fatale.
+fn on_stream_error(what: &'static str, broken: Arc<AtomicBool>) -> impl FnMut(cpal::Error) {
+    move |e| {
+        if is_fatal(&e) {
+            log::warn!("{what} : {e} (relance)");
+            broken.store(true, Ordering::Relaxed);
+        } else {
+            log::debug!("{what} : {e}");
+        }
     }
 }
 
@@ -487,9 +568,16 @@ fn build_input(
     device: &Device,
     config: &SupportedStreamConfig,
     tx: mpsc::Sender<AudioFrame>,
+    broken: Arc<AtomicBool>,
 ) -> Result<cpal::Stream> {
     with_fallback(config, |stream_config| {
-        build_input_format(device, config.sample_format(), stream_config, tx.clone())
+        build_input_format(
+            device,
+            config.sample_format(),
+            stream_config,
+            tx.clone(),
+            broken.clone(),
+        )
     })
 }
 
@@ -498,14 +586,15 @@ fn build_input_format(
     format: SampleFormat,
     stream_config: StreamConfig,
     tx: mpsc::Sender<AudioFrame>,
+    broken: Arc<AtomicBool>,
 ) -> Result<cpal::Stream> {
     match format {
-        SampleFormat::F32 => build_input_typed::<f32>(device, stream_config, tx),
-        SampleFormat::F64 => build_input_typed::<f64>(device, stream_config, tx),
-        SampleFormat::I16 => build_input_typed::<i16>(device, stream_config, tx),
-        SampleFormat::I32 => build_input_typed::<i32>(device, stream_config, tx),
-        SampleFormat::U16 => build_input_typed::<u16>(device, stream_config, tx),
-        SampleFormat::U8 => build_input_typed::<u8>(device, stream_config, tx),
+        SampleFormat::F32 => build_input_typed::<f32>(device, stream_config, tx, broken),
+        SampleFormat::F64 => build_input_typed::<f64>(device, stream_config, tx, broken),
+        SampleFormat::I16 => build_input_typed::<i16>(device, stream_config, tx, broken),
+        SampleFormat::I32 => build_input_typed::<i32>(device, stream_config, tx, broken),
+        SampleFormat::U16 => build_input_typed::<u16>(device, stream_config, tx, broken),
+        SampleFormat::U8 => build_input_typed::<u8>(device, stream_config, tx, broken),
         other => bail!("format audio non géré : {other}"),
     }
 }
@@ -514,6 +603,7 @@ fn build_input_typed<T>(
     device: &Device,
     config: StreamConfig,
     tx: mpsc::Sender<AudioFrame>,
+    broken: Arc<AtomicBool>,
 ) -> Result<cpal::Stream>
 where
     T: SizedSample,
@@ -539,7 +629,7 @@ where
                 }
             }
         },
-        |e| log::warn!("capture audio : {e}"),
+        on_stream_error("capture audio", broken),
         None,
     )?;
     Ok(stream)
@@ -613,6 +703,10 @@ pub struct AudioPlayer {
     last_change: std::time::Instant,
     /// Arrivée du paquet précédent.
     last_push: std::time::Instant,
+    /// Sortie par défaut au démarrage (lecture sans sortie choisie) : si elle
+    /// change (casque branché…), la lecture est relancée sur la nouvelle.
+    pub default_id: Option<String>,
+    broken: Arc<AtomicBool>,
     _stop: std_mpsc::Sender<()>,
 }
 
@@ -622,6 +716,13 @@ impl AudioPlayer {
         let (stop_tx, stop_rx) = std_mpsc::channel::<()>();
         let (ready_tx, ready_rx) =
             std_mpsc::channel::<Result<(Arc<Mutex<PlayBuffer>>, u32, u16, String)>>();
+        let broken = Arc::new(AtomicBool::new(false));
+        let flag = broken.clone();
+        let default_id = if device.is_none() {
+            default_id(host().default_output_device())
+        } else {
+            None
+        };
         std::thread::Builder::new()
             .name("lecture-audio".into())
             .spawn(move || {
@@ -648,7 +749,7 @@ impl AudioPlayer {
                         fade_len: per_ms * FADE_MS as usize,
                         fade_left: 0,
                     }));
-                    let stream = build_output(&device, &config, buffer.clone())?;
+                    let stream = build_output(&device, &config, buffer.clone(), flag)?;
                     stream.play()?;
                     Ok((stream, buffer, rate, channels, device_label(&device)))
                 })();
@@ -676,8 +777,15 @@ impl AudioPlayer {
             seen_underruns: 0,
             last_change: std::time::Instant::now(),
             last_push: std::time::Instant::now(),
+            default_id,
+            broken,
             _stop: stop_tx,
         })
+    }
+
+    /// La sortie a disparu ou le flux est invalide : à relancer.
+    pub fn is_broken(&self) -> bool {
+        self.broken.load(Ordering::Relaxed)
     }
 
     pub fn push(&mut self, frame: &AudioFrame) {
@@ -759,6 +867,7 @@ fn build_output(
     device: &Device,
     config: &SupportedStreamConfig,
     buffer: Arc<Mutex<PlayBuffer>>,
+    broken: Arc<AtomicBool>,
 ) -> Result<cpal::Stream> {
     with_fallback(config, |stream_config| {
         build_output_format(
@@ -766,6 +875,7 @@ fn build_output(
             config.sample_format(),
             stream_config,
             buffer.clone(),
+            broken.clone(),
         )
     })
 }
@@ -775,14 +885,15 @@ fn build_output_format(
     format: SampleFormat,
     stream_config: StreamConfig,
     buffer: Arc<Mutex<PlayBuffer>>,
+    broken: Arc<AtomicBool>,
 ) -> Result<cpal::Stream> {
     match format {
-        SampleFormat::F32 => build_output_typed::<f32>(device, stream_config, buffer),
-        SampleFormat::F64 => build_output_typed::<f64>(device, stream_config, buffer),
-        SampleFormat::I16 => build_output_typed::<i16>(device, stream_config, buffer),
-        SampleFormat::I32 => build_output_typed::<i32>(device, stream_config, buffer),
-        SampleFormat::U16 => build_output_typed::<u16>(device, stream_config, buffer),
-        SampleFormat::U8 => build_output_typed::<u8>(device, stream_config, buffer),
+        SampleFormat::F32 => build_output_typed::<f32>(device, stream_config, buffer, broken),
+        SampleFormat::F64 => build_output_typed::<f64>(device, stream_config, buffer, broken),
+        SampleFormat::I16 => build_output_typed::<i16>(device, stream_config, buffer, broken),
+        SampleFormat::I32 => build_output_typed::<i32>(device, stream_config, buffer, broken),
+        SampleFormat::U16 => build_output_typed::<u16>(device, stream_config, buffer, broken),
+        SampleFormat::U8 => build_output_typed::<u8>(device, stream_config, buffer, broken),
         other => bail!("format audio non géré : {other}"),
     }
 }
@@ -791,6 +902,7 @@ fn build_output_typed<T>(
     device: &Device,
     config: StreamConfig,
     buffer: Arc<Mutex<PlayBuffer>>,
+    broken: Arc<AtomicBool>,
 ) -> Result<cpal::Stream>
 where
     T: SizedSample + FromSample<f32>,
@@ -805,7 +917,7 @@ where
             }
             Err(_) => data.fill(T::EQUILIBRIUM),
         },
-        |e| log::warn!("lecture audio : {e}"),
+        on_stream_error("lecture audio", broken),
         None,
     )?;
     Ok(stream)

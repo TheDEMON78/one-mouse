@@ -4,7 +4,7 @@ use input_event::{Event, KeyboardEvent, PointerEvent};
 use serde::{Deserialize, Serialize};
 
 /// Version du protocole, incrémentée à chaque changement incompatible.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Taille maximale d'un texte de presse-papier synchronisé (512 Kio).
 pub const MAX_CLIPBOARD_LEN: usize = 512 * 1024;
@@ -37,6 +37,8 @@ pub enum Message {
         rate: u32,
         channels: u8,
         data: Vec<u8>,
+        /// Copie du paquet `seq - 1` (UDP) : restitué exactement s'il a été perdu.
+        previous: Vec<u8>,
     },
     /// Port UDP où envoyer le son à ce PC.
     UdpPort(u16),
@@ -229,6 +231,7 @@ mod tests {
             rate: 48_000,
             channels: 1,
             data: vec![1, 2, 3],
+            previous: vec![4, 5],
         };
         let bytes = postcard::to_stdvec(&msg).unwrap();
         assert_eq!(postcard::from_bytes::<Message>(&bytes).unwrap(), msg);

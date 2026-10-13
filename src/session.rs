@@ -8,7 +8,7 @@
 //! Son : par défaut, le PC contrôlé envoie son son au PC qui le contrôle, et le
 //! micro du PC qui contrôle peut être envoyé au PC contrôlé (voir `audio::Mode`).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use input_capture::{CaptureEvent, Position};
@@ -72,6 +72,9 @@ struct State {
     pointer_speed: f64,
     /// Fractions de pixel pas encore envoyées (reportées au mouvement suivant).
     motion_rest: (f64, f64),
+    /// Dernier PC à avoir pris la main (`true` : ce PC). Sans PC principal coché,
+    /// c'est lui qui en tient lieu : le son de l'autre lui parvient en permanence.
+    we_controlled_last: Option<bool>,
 }
 
 pub async fn run(stream: TcpStream, role: Role, local: &mut Local) -> Result<()> {
@@ -204,16 +207,17 @@ async fn event_loop(
         pointer_speed: local.pointer_speed,
         ..State::default()
     };
-    if local.audio.sound == audio::Mode::Always && local.audio.main == state.peer_main {
-        log::info!(
-            "son envoyé seulement quand l'autre PC contrôle celui-ci : pour l'entendre en permanence, \
-             cochez « PC principal » sur le PC où vous écoutez (et seulement sur lui)"
+    if local.audio.main && state.peer_main {
+        log::warn!(
+            "les deux PC sont cochés « PC principal » : le son ne suit que le contrôle. \
+             Cochez-le seulement sur le PC où sont branchés la souris et le casque"
         );
     }
     let mut audio = AudioState::default();
     let mut ping = tokio::time::interval(PING_INTERVAL);
     let mut probe = tokio::time::interval(PROBE_INTERVAL);
     let mut datagram = vec![0u8; 65_536];
+    let mut defaults = audio::watch_defaults();
 
     loop {
         audio.sync(&local.audio, &state);
@@ -256,6 +260,10 @@ async fn event_loop(
                 }
             }
             _ = probe.tick() => udp.probe(),
+            Ok(()) = defaults.changed() => {
+                let now = defaults.borrow_and_update().clone();
+                audio.follow_defaults(&now, &local.audio);
+            }
             frame = recv_frame(&mut audio.sound) => match frame {
                 Some(frame) => send_audio(&mut audio.sound, AudioKind::Sound, link, &frame, &mut udp, out),
                 None => audio.sound.capture_stopped(),
@@ -345,7 +353,7 @@ fn send_audio(
             Err(e) => {
                 log::warn!("compression du son impossible : {e:#}");
                 link.capture = None;
-                link.capture_failed = true;
+                link.encoder_failed = true;
                 return;
             }
         }
@@ -356,6 +364,12 @@ fn send_audio(
     match encoder.push(frame) {
         Ok(packets) => {
             for packet in packets {
+                let previous = if udp.send_ok {
+                    std::mem::replace(&mut link.last_sent, packet.data.clone())
+                } else {
+                    link.last_sent.clear();
+                    Vec::new()
+                };
                 udp.send_audio(
                     out,
                     Message::Audio {
@@ -364,6 +378,9 @@ fn send_audio(
                         format: packet.format,
                         rate: packet.rate,
                         channels: packet.channels,
+                        // En UDP, chaque paquet transporte aussi le précédent : une
+                        // perte isolée est réparée exactement. Inutile en TCP (fiable).
+                        previous,
                         data: packet.data,
                     },
                 );
@@ -378,12 +395,26 @@ fn send_audio(
 #[derive(Default)]
 struct AudioLink {
     capture: Option<AudioCapture>,
-    capture_failed: bool,
+    /// Pas de nouvel essai de capture avant cet instant (échec récent).
+    capture_retry: Option<Instant>,
+    /// Échecs de capture d'affilée (seul le premier est signalé).
+    capture_failures: u32,
+    /// Compression impossible : partage abandonné pour cette connexion.
+    encoder_failed: bool,
     encoder: Option<AudioEncoder>,
+    /// Dernier paquet envoyé, copié dans le suivant (réparation des pertes UDP).
+    last_sent: Vec<u8>,
     decoder: Option<AudioDecoder>,
     player: Option<AudioPlayer>,
-    player_failed: bool,
+    player_retry: Option<Instant>,
+    player_failures: u32,
 }
+
+/// Délai avant de réessayer une capture ou une lecture qui a échoué (périphérique
+/// débranché, occupé…) : le son revient tout seul quand il est de nouveau là.
+const AUDIO_RETRY: Duration = Duration::from_secs(3);
+/// Délai avant de relancer un flux interrompu (laisse le système se stabiliser).
+const AUDIO_RESTART: Duration = Duration::from_millis(500);
 
 impl AudioLink {
     /// Décode un paquet reçu (pertes comblées).
@@ -394,6 +425,7 @@ impl AudioLink {
         rate: u32,
         channels: u8,
         data: &[u8],
+        previous: &[u8],
     ) -> Option<AudioFrame> {
         if self
             .decoder
@@ -402,7 +434,11 @@ impl AudioLink {
         {
             self.decoder = AudioDecoder::new(format, channels).ok();
         }
-        match self.decoder.as_mut()?.decode(seq, rate, data) {
+        match self
+            .decoder
+            .as_mut()?
+            .decode_with(seq, rate, data, previous)
+        {
             Ok(frame) => frame,
             Err(e) => {
                 log::debug!("paquet audio illisible : {e:#}");
@@ -418,36 +454,77 @@ impl AudioLink {
             self.capture = None;
             return;
         }
-        if self.capture.is_some() || self.capture_failed {
+        if self.capture.as_ref().is_some_and(AudioCapture::is_broken) {
+            log::info!("capture audio interrompue ({source:?}), relance");
+            self.capture = None;
+            self.capture_retry = Some(Instant::now() + AUDIO_RESTART);
+        }
+        if self.capture.is_some()
+            || self.encoder_failed
+            || self.capture_retry.is_some_and(|at| Instant::now() < at)
+        {
             return;
         }
         match AudioCapture::start(source, device) {
             Ok(capture) => {
+                if self.capture_failures > 0 {
+                    log::info!("capture audio rétablie ({source:?})");
+                }
+                self.capture_failures = 0;
+                self.capture_retry = None;
                 if source == Source::Microphone {
                     status::emit_mic(MicStatus::Sending(capture.label.clone()));
                 }
                 self.capture = Some(capture);
             }
             Err(e) => {
-                log::warn!("partage audio désactivé ({source:?}) : {e:#}");
-                self.capture_failed = true;
+                if self.capture_failures == 0 {
+                    log::warn!(
+                        "capture audio impossible pour l'instant ({source:?}) : {e:#} — nouvel essai \
+                         toutes les {} s",
+                        AUDIO_RETRY.as_secs()
+                    );
+                } else {
+                    log::debug!("capture audio ({source:?}) : {e:#}");
+                }
+                self.capture_failures += 1;
+                self.capture_retry = Some(Instant::now() + AUDIO_RETRY);
             }
         }
     }
 
     fn capture_stopped(&mut self) {
-        log::warn!("la capture audio s'est arrêtée");
+        log::warn!("la capture audio s'est arrêtée, relance");
         self.capture = None;
-        self.capture_failed = true;
+        self.capture_retry = Some(Instant::now() + AUDIO_RESTART);
     }
 
     fn play(&mut self, frame: &AudioFrame, output: Option<&str>) {
-        if self.player.is_none() && !self.player_failed {
+        if self.player.as_ref().is_some_and(AudioPlayer::is_broken) {
+            log::info!("lecture audio interrompue, relance");
+            self.player = None;
+            self.player_retry = Some(Instant::now() + AUDIO_RESTART);
+        }
+        if self.player.is_none() && self.player_retry.is_none_or(|at| Instant::now() >= at) {
             match AudioPlayer::start(output) {
-                Ok(player) => self.player = Some(player),
+                Ok(player) => {
+                    if self.player_failures > 0 {
+                        log::info!("lecture du son reçu rétablie");
+                    }
+                    self.player_failures = 0;
+                    self.player_retry = None;
+                    self.player = Some(player);
+                }
                 Err(e) => {
-                    log::warn!("lecture du son reçu impossible : {e:#}");
-                    self.player_failed = true;
+                    if self.player_failures == 0 {
+                        log::warn!(
+                            "lecture du son reçu impossible pour l'instant : {e:#} — nouvel essai \
+                             toutes les {} s",
+                            AUDIO_RETRY.as_secs()
+                        );
+                    }
+                    self.player_failures += 1;
+                    self.player_retry = Some(Instant::now() + AUDIO_RETRY);
                 }
             }
         }
@@ -463,11 +540,49 @@ struct AudioState {
     mic: AudioLink,
     /// Sortie où est joué le micro reçu (micro virtuel), une fois choisie.
     mic_output: Option<String>,
+    /// Aucun micro virtuel pour recevoir le micro de l'autre PC.
+    mic_unavailable: bool,
     /// Micro virtuel mis par défaut pendant la connexion (rétabli à la fin).
     _default_mic: Option<default_mic::DefaultMicGuard>,
 }
 
 impl AudioState {
+    /// Le périphérique par défaut a changé (casque branché, sortie choisie dans
+    /// Windows…) : les flux qui l'utilisaient sont relancés sur le nouveau.
+    fn follow_defaults(&mut self, defaults: &audio::DefaultDevices, config: &AudioConfig) {
+        let changed = |was: &Option<String>, now: &Option<String>| was.is_some() && was != now;
+        if config.sound_device.is_none()
+            && self
+                .sound
+                .capture
+                .as_ref()
+                .is_some_and(|c| changed(&c.default_id, &defaults.output))
+        {
+            log::info!("sortie audio par défaut changée : capture du son relancée");
+            self.sound.capture = None;
+        }
+        if config.mic_device.is_none()
+            && self
+                .mic
+                .capture
+                .as_ref()
+                .is_some_and(|c| changed(&c.default_id, &defaults.input))
+        {
+            log::info!("micro par défaut changé : capture du micro relancée");
+            self.mic.capture = None;
+        }
+        if config.sound_output.is_none()
+            && self
+                .sound
+                .player
+                .as_ref()
+                .is_some_and(|p| changed(&p.default_id, &defaults.output))
+        {
+            log::info!("sortie audio par défaut changée : le son de l'autre PC y est joué");
+            self.sound.player = None;
+        }
+    }
+
     /// Démarre ou arrête les captures selon qui contrôle qui.
     fn sync(&mut self, config: &AudioConfig, state: &State) {
         let (sound, mic) = audio_directions(config, state);
@@ -478,16 +593,39 @@ impl AudioState {
     }
 }
 
+/// Retient le PC qui vient de prendre la main (PC principal implicite).
+fn note_controller(state: &mut State, we: bool) {
+    if state.we_controlled_last != Some(we) {
+        if !state.peer_main {
+            log::info!(
+                "{} : le son de l'autre PC y arrive désormais en permanence",
+                if we {
+                    "ce PC contrôle l'autre, il fait office de PC principal"
+                } else {
+                    "l'autre PC contrôle celui-ci, il fait office de PC principal"
+                }
+            );
+        }
+        state.we_controlled_last = Some(we);
+    }
+}
+
 /// Faut-il envoyer maintenant (son du système, micro) ?
 ///
 /// Le son va de l'autre PC vers le PC principal, le micro du PC principal vers
-/// l'autre. Sans PC principal défini (ou avec deux), le son n'est envoyé que par
-/// le PC contrôlé et le micro que par celui qui contrôle : un seul sens à la fois,
-/// donc jamais de boucle d'écho (le son joué serait recapturé et renvoyé).
+/// l'autre. Sans PC principal coché, le dernier PC à avoir pris la main en tient
+/// lieu. Avec deux PC principaux (ou avant toute prise de main), le son n'est
+/// envoyé que par le PC contrôlé et le micro que par celui qui contrôle : un seul
+/// sens à la fois, donc jamais de boucle d'écho.
 fn audio_directions(config: &AudioConfig, state: &State) -> (bool, bool) {
     use audio::Mode;
     let auto = |mode: Mode, active: bool| mode != Mode::Off && active;
-    match (config.main, state.peer_main) {
+    // Aucun PC principal coché : le dernier PC à avoir pris la main en tient lieu.
+    let (local_main, peer_main) = match (config.main, state.peer_main, state.we_controlled_last) {
+        (false, false, Some(we)) => (we, !we),
+        roles => (roles.0, roles.1),
+    };
+    match (local_main, peer_main) {
         (false, true) => (config.sound.wanted(state.receiving), false),
         (true, false) => (false, config.mic.wanted(state.sending)),
         _ => (
@@ -526,6 +664,7 @@ async fn on_capture(
         CaptureEvent::Begin => {
             log::info!("le curseur passe sur l'autre PC");
             state.sending = true;
+            note_controller(state, true);
             status::emit(Status::Sending);
             send(out, Message::Enter).await?;
         }
@@ -575,6 +714,7 @@ async fn on_message(
         Message::Enter => {
             log::info!("l'autre PC prend le contrôle de celui-ci");
             state.receiving = true;
+            note_controller(state, false);
             status::emit(Status::Receiving);
         }
         Message::Input(event) if state.receiving => {
@@ -613,12 +753,13 @@ async fn on_message(
             rate,
             channels,
             data,
+            previous,
         } => {
             let link = match kind {
                 AudioKind::Sound => &mut audio.sound,
                 AudioKind::Mic => &mut audio.mic,
             };
-            let Some(frame) = link.decode(seq, format, rate, channels, &data) else {
+            let Some(frame) = link.decode(seq, format, rate, channels, &data, &previous) else {
                 return Ok(());
             };
             match kind {
@@ -626,7 +767,7 @@ async fn on_message(
                     .sound
                     .play(&frame, local.audio.sound_output.as_deref()),
                 AudioKind::Mic => {
-                    if audio.mic.player.is_none() && !audio.mic.player_failed {
+                    if audio.mic_output.is_none() && !audio.mic_unavailable {
                         // Le micro de l'autre PC devient un micro de ce PC : il est joué
                         // dans un micro virtuel, jamais sur les haut-parleurs (écho).
                         let output = local
@@ -652,7 +793,7 @@ async fn on_message(
                                      (Windows, vb-audio.com/Cable) ou BlackHole (macOS), puis redémarrez le partage"
                                 );
                                 status::emit_mic(MicStatus::NoVirtual);
-                                audio.mic.player_failed = true;
+                                audio.mic_unavailable = true;
                             }
                         }
                     }
@@ -806,22 +947,37 @@ mod tests {
     }
 
     #[test]
-    fn without_main_pc_sound_follows_control_to_avoid_echo() {
-        for main in [false, true] {
-            let cfg = config(main, Mode::Always, Mode::Always);
-            // Jamais les deux PC en même temps : chacun ne peut être que contrôlé ou contrôleur.
-            assert_eq!(
-                audio_directions(&cfg, &state(main, false, false)),
-                (false, false)
-            );
-            assert_eq!(
-                audio_directions(&cfg, &state(main, false, true)),
-                (true, false)
-            );
-            assert_eq!(
-                audio_directions(&cfg, &state(main, true, false)),
-                (false, true)
-            );
-        }
+    fn two_main_pcs_follow_control_to_avoid_echo() {
+        let cfg = config(true, Mode::Always, Mode::Always);
+        // Jamais les deux PC en même temps : chacun ne peut être que contrôlé ou contrôleur.
+        assert_eq!(
+            audio_directions(&cfg, &state(true, false, false)),
+            (false, false)
+        );
+        assert_eq!(
+            audio_directions(&cfg, &state(true, false, true)),
+            (true, false)
+        );
+        assert_eq!(
+            audio_directions(&cfg, &state(true, true, false)),
+            (false, true)
+        );
+    }
+
+    #[test]
+    fn without_main_pc_last_controller_acts_as_main() {
+        let cfg = config(false, Mode::Always, Mode::Always);
+        let mut st = state(false, false, false);
+        // Avant toute prise de main : rien.
+        assert_eq!(audio_directions(&cfg, &st), (false, false));
+        // L'autre PC a pris la main puis l'a rendue : son envoyé en permanence.
+        note_controller(&mut st, false);
+        assert_eq!(audio_directions(&cfg, &st), (true, false));
+        st.receiving = true;
+        assert_eq!(audio_directions(&cfg, &st), (true, false));
+        // Ce PC a pris la main : il reçoit le son et envoie son micro, même revenu chez lui.
+        st.receiving = false;
+        note_controller(&mut st, true);
+        assert_eq!(audio_directions(&cfg, &st), (false, true));
     }
 }
