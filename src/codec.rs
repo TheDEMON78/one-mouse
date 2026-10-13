@@ -12,7 +12,7 @@ use anyhow::{Result, anyhow, ensure};
 use opus::{Application, Bitrate, Channels, Decoder, Encoder};
 use serde::{Deserialize, Serialize};
 
-use crate::audio::{AudioFrame, Converter};
+use crate::audio::{AudioFrame, Converter, remix};
 use crate::protocol::{AudioFormat, AudioKind};
 
 /// Qualité de transport choisie par l'utilisateur.
@@ -81,7 +81,11 @@ enum EncoderKind {
     Pcm {
         pending: Vec<f32>,
         rate: u32,
+        /// Canaux de la capture.
+        source: usize,
+        /// Canaux envoyés : stéréo au plus pour le son, mono pour le micro.
         channels: usize,
+        max_channels: usize,
     },
     Opus {
         encoder: Box<Encoder>,
@@ -98,7 +102,9 @@ impl AudioEncoder {
             Quality::Lossless => EncoderKind::Pcm {
                 pending: Vec::new(),
                 rate: 0,
+                source: 0,
                 channels: 0,
+                max_channels: opus_channels_for(kind),
             },
             Quality::Compressed => {
                 let channels = opus_channels_for(kind);
@@ -138,14 +144,17 @@ impl AudioEncoder {
             EncoderKind::Pcm {
                 pending,
                 rate,
+                source,
                 channels,
+                max_channels,
             } => {
-                if frame.rate != *rate || frame.channels as usize != *channels {
+                if frame.rate != *rate || frame.channels as usize != *source {
                     pending.clear();
                     *rate = frame.rate;
-                    *channels = frame.channels as usize;
+                    *source = frame.channels as usize;
+                    *channels = (*source).min(*max_channels);
                 }
-                pending.extend_from_slice(&frame.samples);
+                pending.extend(remix(&frame.samples, *source, *channels));
                 let chunk = (*rate as u64 * PCM_CHUNK_US as u64 / 1_000_000) as usize * *channels;
                 while chunk > 0 && pending.len() >= chunk {
                     let data = pending[..chunk]

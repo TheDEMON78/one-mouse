@@ -69,8 +69,11 @@ Le mot de passe peut aussi passer par la variable `ONE_MOUSE_PASSWORD`. `one-mou
   pour un Wi-Fi saturé. Le son passe en **UDP chiffré** (paquets de 2,5 ms : un paquet perdu est comblé au lieu de
   bloquer le flux), avec repli automatique en TCP si l'UDP est bloqué. Rééchantillonnage par sinc fenêtré, tampon
   adaptatif (qui ne grossit pas pendant les silences), fondus anti-clic, compensation de la dérive des cartes son.
-- **Casque Bluetooth** : utiliser son micro le fait passer en « mode téléphone » (son mono, faible qualité). Choisissez
-  le micro intégré du PC dans l'onglet Son (« Micro utilisé »), ou n'envoyez pas le micro.
+- **Casque Bluetooth** : utiliser son micro le fait passer en « mode téléphone » (son mono, qualité radio). Avec
+  « micro par défaut », one-mouse prend automatiquement un autre micro (intégré au PC, webcam…) s'il en existe un.
+- **Multicanal** : un casque « 7.1 » ou des enceintes 5.1 reçoivent un vrai mixage (stéréo sur l'avant gauche et
+  droite, centre conservé à -3 dB quand le 5.1/7.1 est ramené en stéréo), jamais une copie des voies.
+- **Windows** : désactivez « Son spatial » et les « Améliorations audio » de Windows sur le casque : elles colorent le son.
 - **Vitesse de la souris** sur l'autre PC : réglage de ×0,25 à ×4 (`--pointer-speed`), si les deux PC n'ont pas la
   même sensibilité.
 - `one-mouse audio-devices` liste les périphériques (`--sound-device`, `--mic-device`, `--sound-output`,

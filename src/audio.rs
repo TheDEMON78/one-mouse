@@ -21,8 +21,8 @@ use cpal::{
 };
 use tokio::sync::mpsc;
 
-/// Durée d'un paquet audio envoyé sur le réseau.
-const FRAME_MS: u32 = 10;
+/// Durée des morceaux de son capturés (plus court = moins de latence).
+const FRAME_MS: u32 = 5;
 /// Tampon de lecture visé au départ : son accumulé avant de démarrer, et niveau que
 /// la compensation de dérive cherche à maintenir. Il s'adapte au réseau : agrandi
 /// après chaque coupure (à-coups du Wi-Fi), réduit quand tout est stable.
@@ -35,7 +35,7 @@ const TARGET_STEP_DOWN_MS: u32 = 20;
 /// silencieux (Windows n'envoie rien quand aucun son ne joue).
 const SILENCE_GAP: std::time::Duration = std::time::Duration::from_millis(150);
 /// Durée sans coupure avant de réduire le tampon.
-const STABLE_BEFORE_SHRINK: std::time::Duration = std::time::Duration::from_secs(30);
+const STABLE_BEFORE_SHRINK: std::time::Duration = std::time::Duration::from_secs(20);
 /// Marge au-delà de la cible avant de jeter le son en trop (rester synchrone).
 const MAX_EXTRA_MS: u32 = 300;
 /// Tampon demandé à la carte son (capture et lecture).
@@ -135,6 +135,42 @@ fn device_label(device: &Device) -> String {
         (_, Ok(id)) => id.id().to_owned(),
         _ => "?".to_owned(),
     }
+}
+
+/// Micro d'un casque Bluetooth (profil mains libres), d'après son nom ou son
+/// identifiant : « … Hands-Free AG Audio » sous Windows, `bluez_…` sous Linux.
+fn is_bluetooth_mic(device: &Device) -> bool {
+    let text = format!("{} {}", device_label(device), id_string(device)).to_lowercase();
+    is_bluetooth_name(&text)
+}
+
+fn is_bluetooth_name(text: &str) -> bool {
+    [
+        "hands-free",
+        "handsfree",
+        "mains libres",
+        "bluez",
+        "bluetooth",
+        "headset_head_unit",
+    ]
+    .iter()
+    .any(|word| text.contains(word))
+}
+
+/// Vrai micro utilisable à la place d'un micro Bluetooth : ni Bluetooth, ni
+/// son d'une sortie (« monitor »), ni micro virtuel.
+fn is_plain_mic(device: &Device) -> bool {
+    let text = format!("{} {}", device_label(device), id_string(device)).to_lowercase();
+    !is_bluetooth_name(&text)
+        && ![
+            "monitor",
+            "one_mouse",
+            "cable output",
+            "blackhole",
+            "vb-audio",
+        ]
+        .iter()
+        .any(|word| text.contains(word))
 }
 
 /// Trouve un périphérique par son nom (même partiel, sans tenir compte de la casse) ou son identifiant.
@@ -293,7 +329,26 @@ fn capture_device(
     }
     match source {
         Source::Microphone => {
-            let device = host.default_input_device().context("aucun micro trouvé")?;
+            let mut device = host.default_input_device().context("aucun micro trouvé")?;
+            if is_bluetooth_mic(&device) {
+                // Ouvrir le micro d'un casque Bluetooth le bascule en « mode
+                // téléphone » : tout son son passe en mono 16 kHz, qualité radio.
+                // Un autre micro (intégré au PC, webcam…) garde le casque en stéréo.
+                if let Some(other) = host.input_devices()?.find(is_plain_mic) {
+                    log::info!(
+                        "micro « {} » ignoré (casque Bluetooth : il dégraderait le son en \
+                         qualité téléphone), « {} » utilisé à la place",
+                        device_label(&device),
+                        device_label(&other)
+                    );
+                    device = other;
+                } else {
+                    log::warn!(
+                        "seul micro disponible : celui du casque Bluetooth, qui passe en \
+                         qualité téléphone tant qu'il est utilisé"
+                    );
+                }
+            }
             let config = device.default_input_config()?;
             Ok((device, config))
         }
@@ -630,7 +685,7 @@ impl AudioPlayer {
 }
 
 impl AudioPlayer {
-    /// Tampon adaptatif : plus grand après une coupure, plus petit après 30 s sans.
+    /// Tampon adaptatif : plus grand après une coupure, plus petit après 20 s sans.
     fn adapt_target(&mut self, buffer: &mut PlayBuffer, gap: std::time::Duration) {
         if buffer.underruns > self.seen_underruns && gap > SILENCE_GAP {
             // Le son s'est arrêté chez l'autre PC (silence : rien à envoyer), ce
@@ -732,6 +787,78 @@ where
 
 /// Convertit le son reçu vers la fréquence et le nombre de canaux de la sortie.
 ///
+/// Coefficient des voies mélangées à -3 dB (centre, surround).
+const MINUS_3DB: f32 = std::f32::consts::FRAC_1_SQRT_2;
+
+/// Gauche et droite d'une trame, selon les dispositions standard de Windows,
+/// macOS et PulseAudio : 3 = FL FR FC, 4 = FL FR BL BR, 5 = FL FR FC BL BR,
+/// 6 = FL FR FC LFE BL BR, 7 = FL FR FC LFE BC SL SR, 8 = FL FR FC LFE BL BR SL SR.
+/// Le centre va des deux côtés à -3 dB, chaque surround de son côté à -3 dB, le
+/// caisson de basses est ignoré (comme le fait Windows en stéréo).
+fn stereo_of(frame: &[f32]) -> (f32, f32) {
+    let g = MINUS_3DB;
+    let [l, r] = [frame[0], frame[1]];
+    let (center, left, right) = match frame.len() {
+        3 => (frame[2], 0.0, 0.0),
+        4 => (0.0, frame[2], frame[3]),
+        5 => (frame[2], frame[3], frame[4]),
+        6 => (frame[2], frame[4], frame[5]),
+        7 => (frame[2], frame[5] + g * frame[4], frame[6] + g * frame[4]),
+        n if n >= 8 => (frame[2], frame[4] + frame[6], frame[5] + frame[7]),
+        _ => (0.0, 0.0, 0.0),
+    };
+    (
+        soft_limit(l + g * (center + left)),
+        soft_limit(r + g * (center + right)),
+    )
+}
+
+/// Laisse passer le son intact jusqu'à 0,9 puis l'arrondit en douceur vers 1 :
+/// un mixage multicanal fort ne sature jamais en craquant.
+fn soft_limit(x: f32) -> f32 {
+    const KNEE: f32 = 0.9;
+    let a = x.abs();
+    if a <= KNEE {
+        x
+    } else {
+        x.signum() * (KNEE + (1.0 - KNEE) * ((a - KNEE) / (1.0 - KNEE)).tanh())
+    }
+}
+
+/// Convertit des échantillons entrelacés de `in_ch` vers `out_ch` canaux.
+///
+/// Mono et stéréo vont uniquement sur l'avant gauche et l'avant droite de la
+/// sortie : les autres voies restent muettes (sinon un casque 7.1 entendrait
+/// gauche et droite mélangées partout, son métallique qui saute d'un côté à
+/// l'autre). Le multicanal est d'abord ramené en stéréo par un vrai mixage, qui
+/// garde le centre (les voix).
+pub(crate) fn remix(samples: &[f32], in_ch: usize, out_ch: usize) -> Vec<f32> {
+    if in_ch == 0 || out_ch == 0 {
+        return Vec::new();
+    }
+    if in_ch == out_ch {
+        let whole = samples.len() / in_ch * in_ch;
+        return samples[..whole].to_vec();
+    }
+    let frames = samples.len() / in_ch;
+    let mut out = Vec::with_capacity(frames * out_ch);
+    for frame in samples.chunks_exact(in_ch) {
+        let (l, r) = match in_ch {
+            1 => (frame[0], frame[0]),
+            2 => (frame[0], frame[1]),
+            _ => stereo_of(frame),
+        };
+        if out_ch == 1 {
+            out.push(0.5 * (l + r));
+        } else {
+            out.push(l);
+            out.push(r);
+            out.extend(std::iter::repeat_n(0.0, out_ch - 2));
+        }
+    }
+    out
+}
+
 /// Interpolation par sinc fenêtré (Blackman, 32 points) avec filtre
 /// anti-repliement quand la fréquence baisse : qualité des logiciels audio
 /// professionnels. État conservé d'un paquet à l'autre. `speed` accélère ou
@@ -778,20 +905,8 @@ impl Converter {
             self.pos = HISTORY as f64;
         }
 
-        // 1. Canaux : conversion vers le nombre de canaux de la sortie.
-        let mapped: Vec<f32> = frame
-            .samples
-            .chunks_exact(in_channels)
-            .flat_map(|input| {
-                (0..out_ch).map(move |c| {
-                    if out_ch == 1 && in_channels > 1 {
-                        input.iter().sum::<f32>() / in_channels as f32
-                    } else {
-                        input[c % in_channels]
-                    }
-                })
-            })
-            .collect();
+        // 1. Canaux : mixage vers le nombre de canaux de la sortie.
+        let mapped = remix(&frame.samples, in_channels, out_ch);
         let frames = mapped.len() / out_ch;
         if frames == 0 {
             return Vec::new();
@@ -872,6 +987,55 @@ mod tests {
             channels,
             samples: samples.into_iter().map(|s| s as f32 / 32768.0).collect(),
         }
+    }
+
+    #[test]
+    fn remix_stereo_to_surround_uses_front_only() {
+        let out = remix(&[0.25, -0.5, 0.1, 0.2], 2, 8);
+        assert_eq!(out.len(), 16);
+        assert_eq!(&out[..2], &[0.25, -0.5]);
+        assert!(out[2..8].iter().all(|&s| s == 0.0));
+        assert_eq!(&out[8..10], &[0.1, 0.2]);
+        assert!(out[10..].iter().all(|&s| s == 0.0));
+        let out = remix(&[0.25, -0.5], 2, 6);
+        assert_eq!(out, vec![0.25, -0.5, 0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn remix_surround_to_stereo_keeps_center() {
+        // Voix au centre seulement (7.1) : elle doit sortir des deux côtés.
+        let mut frame = [0.0f32; 8];
+        frame[2] = 0.5;
+        let out = remix(&frame, 8, 2);
+        assert!((out[0] - 0.5 * MINUS_3DB).abs() < 1e-6);
+        assert_eq!(out[0], out[1]);
+        // Surround gauche : seulement à gauche ; caisson ignoré.
+        let out = remix(&[0.0, 0.0, 0.0, 0.9, 0.3, 0.0], 6, 2);
+        assert!((out[0] - 0.3 * MINUS_3DB).abs() < 1e-6);
+        assert_eq!(out[1], 0.0);
+    }
+
+    #[test]
+    fn remix_never_clips() {
+        let out = remix(&[1.0; 8], 8, 2);
+        assert!(out.iter().all(|&s| s > 0.9 && s <= 1.0));
+        // En dessous du seuil, rien ne change.
+        assert_eq!(soft_limit(0.5), 0.5);
+    }
+
+    #[test]
+    fn bluetooth_mics_detected() {
+        assert!(is_bluetooth_name("casque (wh-1000xm4 hands-free ag audio)"));
+        assert!(is_bluetooth_name("bluez_input.aa_bb_cc.headset-head-unit"));
+        assert!(!is_bluetooth_name("microphone (realtek(r) audio)"));
+    }
+
+    #[test]
+    fn remix_mono() {
+        assert_eq!(remix(&[0.5, 0.1], 1, 2), vec![0.5, 0.5, 0.1, 0.1]);
+        assert_eq!(remix(&[0.2, 0.4], 2, 1), vec![0.3]);
+        let out = remix(&[0.0, 0.0, 0.4, 0.0, 0.0, 0.0], 6, 1);
+        assert!((out[0] - 0.4 * MINUS_3DB).abs() < 1e-6);
     }
 
     #[test]

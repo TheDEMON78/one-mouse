@@ -534,8 +534,8 @@ impl App {
                         ui.label(
                             egui::RichText::new(
                                 "Casque Bluetooth : utiliser son micro le fait passer en « mode téléphone » \
-                                 (son mono de faible qualité). Pour garder un son parfait, choisissez le \
-                                 micro intégré du PC, ou « jamais ».",
+                                 (son mono, qualité radio). Avec « micro par défaut », one-mouse prend \
+                                 automatiquement un autre micro (intégré au PC, webcam…) s'il en existe un.",
                             )
                             .small()
                             .color(ORANGE),
