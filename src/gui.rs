@@ -178,6 +178,7 @@ struct App {
     /// `Some(false)` : le pare-feu Windows risque de bloquer l'autre PC.
     firewall_allowed: Option<bool>,
     outputs: Vec<String>,
+    inputs: Vec<String>,
     local_ip: Option<IpAddr>,
     error: Option<String>,
     logo: egui::TextureHandle,
@@ -206,6 +207,7 @@ impl App {
             autostart: autostart::is_enabled(),
             firewall_allowed: firewall::is_allowed(),
             outputs: audio::output_names(),
+            inputs: audio::input_names(),
             local_ip: local_ip(),
             error: None,
             logo,
@@ -504,6 +506,7 @@ impl App {
     fn sound_tab(&mut self, ui: &mut egui::Ui, running: bool) {
         ui.add_enabled_ui(!running, |ui| {
             let outputs = &self.outputs;
+            let inputs = &self.inputs;
             let s = &mut self.settings;
             card(ui, |ui| {
                 section_title(ui, "PC principal");
@@ -525,6 +528,18 @@ impl App {
                     section_title(ui, "Son et micro de ce PC principal");
                     output_combo(ui, "sound_output", "Son de l'autre PC joué sur", &mut s.sound_output, outputs);
                     mode_combo(ui, "mic", "Mon micro envoyé à l'autre PC", &mut s.mic, "quand je le contrôle");
+                    if s.mic != Mode::Off {
+                        device_combo(ui, "mic_device", "Micro utilisé", "micro par défaut", &mut s.mic_device, inputs);
+                        ui.label(
+                            egui::RichText::new(
+                                "Casque Bluetooth : utiliser son micro le fait passer en « mode téléphone » \
+                                 (son mono de faible qualité). Pour garder un son parfait, choisissez le \
+                                 micro intégré du PC, ou « jamais ».",
+                            )
+                            .small()
+                            .color(ORANGE),
+                        );
+                    }
                 } else {
                     section_title(ui, "Son et micro de ce PC");
                     mode_combo(ui, "sound", "Son de ce PC envoyé", &mut s.sound, "quand l'autre PC le contrôle");
@@ -541,10 +556,11 @@ impl App {
             });
         });
         if ui
-            .small_button("Actualiser la liste des sorties audio")
+            .small_button("Actualiser la liste des périphériques audio")
             .clicked()
         {
             self.outputs = audio::output_names();
+            self.inputs = audio::input_names();
         }
     }
 
@@ -890,6 +906,32 @@ fn mode_combo(ui: &mut egui::Ui, id: &str, label: &str, mode: &mut Mode, auto: &
             .show_ui(ui, |ui| {
                 for m in Mode::ALL {
                     ui.selectable_value(mode, m, text(m));
+                }
+            });
+    });
+}
+
+fn device_combo(
+    ui: &mut egui::Ui,
+    id: &str,
+    label: &str,
+    automatic: &str,
+    value: &mut String,
+    devices: &[String],
+) {
+    let shown = if value.is_empty() {
+        automatic.to_owned()
+    } else {
+        value.clone()
+    };
+    field(ui, label, |ui| {
+        egui::ComboBox::from_id_salt(id)
+            .selected_text(shown)
+            .width(ui.available_width())
+            .show_ui(ui, |ui| {
+                ui.selectable_value(value, String::new(), automatic);
+                for name in devices {
+                    ui.selectable_value(value, name.clone(), name);
                 }
             });
     });

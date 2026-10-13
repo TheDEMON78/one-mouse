@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::audio::AudioFrame;
 
 /// Version du protocole, incrémentée à chaque changement incompatible.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Taille maximale d'un texte de presse-papier synchronisé (512 Kio).
 pub const MAX_CLIPBOARD_LEN: usize = 512 * 1024;
@@ -30,7 +30,7 @@ pub enum Message {
     Leave,
     /// Nouveau texte copié dans le presse-papier.
     Clipboard(String),
-    /// Paquet de son (PCM 16 bits little-endian entrelacé).
+    /// Paquet de son (flottants 32 bits little-endian entrelacés).
     Audio {
         kind: AudioKind,
         rate: u32,
@@ -69,17 +69,17 @@ impl Message {
 
 /// Reconstitue un paquet de son reçu ; `None` s'il est invalide.
 pub fn audio_frame(rate: u32, channels: u16, pcm: &[u8]) -> Option<AudioFrame> {
-    if !pcm.len().is_multiple_of(2) {
+    if !pcm.len().is_multiple_of(4) {
         return None;
     }
     let frame = AudioFrame {
         rate,
         channels,
         samples: pcm
-            .as_chunks::<2>()
+            .as_chunks::<4>()
             .0
             .iter()
-            .map(|&b| i16::from_le_bytes(b))
+            .map(|&b| f32::from_le_bytes(b))
             .collect(),
     };
     frame.is_valid().then_some(frame)
@@ -238,7 +238,7 @@ mod tests {
         let frame = AudioFrame {
             rate: 48_000,
             channels: 2,
-            samples: vec![0, -1, i16::MAX, i16::MIN],
+            samples: vec![0.0, -0.25, 1.0, -1.0],
         };
         let Message::Audio {
             kind,
@@ -252,6 +252,7 @@ mod tests {
         assert_eq!(kind, AudioKind::Mic);
         assert_eq!(audio_frame(rate, channels, &pcm), Some(frame));
         assert_eq!(audio_frame(48_000, 2, &[0, 0, 0]), None);
+        assert_eq!(audio_frame(48_000, 1, &f32::NAN.to_le_bytes()), None);
         assert_eq!(audio_frame(48_000, 0, &[]), None);
     }
 }

@@ -71,6 +71,8 @@ pub struct Settings {
     pub mic: audio::Mode,
     pub sound_output: String,
     pub mic_output: String,
+    /// Micro à envoyer (vide = micro par défaut du système).
+    pub mic_device: String,
     /// Démarre le partage dès l'ouverture de la fenêtre.
     pub start_sharing: bool,
     /// Version du format, pour adapter les anciens réglages (absent = ancien format 0).
@@ -96,6 +98,7 @@ impl Default for Settings {
             mic: audio::Mode::Always,
             sound_output: String::new(),
             mic_output: String::new(),
+            mic_device: String::new(),
             start_sharing: false,
             format: FORMAT,
         }
@@ -162,6 +165,7 @@ impl Settings {
             ("--name", &self.name),
             ("--sound-output", &self.sound_output),
             ("--mic-output", &self.mic_output),
+            ("--mic-device", &self.mic_device),
         ];
         for (flag, value) in optional {
             if !value.trim().is_empty() {

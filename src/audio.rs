@@ -40,6 +40,10 @@ const DEVICE_BUFFER_MS: u32 = 20;
 /// Correction maximale de la vitesse de lecture (0,2 % : imperceptible). Suffit
 /// largement pour la dérive entre deux cartes son (quelques centièmes de %).
 const MAX_DRIFT_CORRECTION: f64 = 0.002;
+/// Écart au tampon cible (en proportion) toléré sans correction de vitesse.
+const DRIFT_DEADBAND: f64 = 0.25;
+/// Fondu d'entrée appliqué après une reprise ou un rattrapage.
+const FADE_MS: u32 = 5;
 /// Au-delà de ce remplissage (en multiple de la cible), le retard est rattrapé
 /// d'un coup plutôt que par la correction de vitesse, qui serait trop lente.
 const RESYNC_LEVEL: f64 = 2.0;
@@ -103,12 +107,13 @@ pub enum Source {
     Microphone,
 }
 
-/// Paquet de son PCM 16 bits entrelacé.
+/// Paquet de son entrelacé en virgule flottante 32 bits : aucune perte entre
+/// la carte son qui capture et celle qui joue.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioFrame {
     pub rate: u32,
     pub channels: u16,
-    pub samples: Vec<i16>,
+    pub samples: Vec<f32>,
 }
 
 impl AudioFrame {
@@ -116,6 +121,7 @@ impl AudioFrame {
         (8_000..=192_000).contains(&self.rate)
             && (1..=8).contains(&self.channels)
             && self.samples.len().is_multiple_of(self.channels as usize)
+            && self.samples.iter().all(|s| s.is_finite())
     }
 }
 
@@ -164,8 +170,19 @@ pub fn list_devices() -> Result<()> {
 
 /// Noms des sorties audio, pour les choix de l'interface.
 pub fn output_names() -> Vec<String> {
-    let host = host();
-    let Ok(devices) = host.output_devices() else {
+    names(host().output_devices())
+}
+
+/// Noms des entrées audio (micros), hors sources « monitor » (son des sorties).
+pub fn input_names() -> Vec<String> {
+    names(host().input_devices())
+        .into_iter()
+        .filter(|name| !name.to_lowercase().starts_with("monitor of"))
+        .collect()
+}
+
+fn names(devices: Result<impl Iterator<Item = Device>, cpal::Error>) -> Vec<String> {
+    let Ok(devices) = devices else {
         return Vec::new();
     };
     let mut names: Vec<String> = devices.map(|d| device_label(&d)).collect();
@@ -410,7 +427,7 @@ fn build_input_typed<T>(
 ) -> Result<cpal::Stream>
 where
     T: SizedSample,
-    i16: FromSample<T>,
+    f32: FromSample<T>,
 {
     let rate = config.sample_rate;
     let channels = config.channels;
@@ -420,7 +437,7 @@ where
         config,
         move |data: &[T], _: &cpal::InputCallbackInfo| {
             for &sample in data {
-                buffer.push(sample.to_sample::<i16>());
+                buffer.push(sample.to_sample::<f32>());
                 if buffer.len() >= frame_len {
                     let samples = std::mem::replace(&mut buffer, Vec::with_capacity(frame_len));
                     // Réseau saturé : on perd ce paquet plutôt que d'accumuler du retard.
@@ -448,6 +465,10 @@ struct PlayBuffer {
     channels: usize,
     /// Nombre de fois où le tampon s'est vidé (coupure audible).
     underruns: u64,
+    /// Longueur du fondu d'entrée (échantillons) après une reprise ou un rattrapage.
+    fade_len: usize,
+    /// Échantillons de fondu restant à appliquer.
+    fade_left: usize,
 }
 
 impl PlayBuffer {
@@ -467,8 +488,15 @@ impl PlayBuffer {
                 return 0.0;
             }
             self.primed = true;
+            // Reprise en fondu : pas de « clic » quand le son repart.
+            self.fade_left = self.fade_len;
         }
         match self.samples.pop_front() {
+            Some(s) if self.fade_left > 0 => {
+                let gain = 1.0 - self.fade_left as f32 / self.fade_len as f32;
+                self.fade_left -= 1;
+                s * gain
+            }
             Some(s) => s,
             None => {
                 self.primed = false;
@@ -525,6 +553,8 @@ impl AudioPlayer {
                         max_len: per_ms * (TARGET_MS + MAX_EXTRA_MS) as usize,
                         channels: channels as usize,
                         underruns: 0,
+                        fade_len: per_ms * FADE_MS as usize,
+                        fade_left: 0,
                     }));
                     let stream = build_output(&device, &config, buffer.clone())?;
                     stream.play()?;
@@ -572,9 +602,11 @@ impl AudioPlayer {
                 let excess = buffer.samples.len() - buffer.prime_len;
                 let excess = excess - excess % buffer.channels;
                 buffer.samples.drain(..excess);
+                buffer.fade_left = buffer.fade_len;
                 self.fill = 1.0;
             } else {
-                self.fill = 0.98 * self.fill + 0.02 * level;
+                // Lissage sur ~2 s : les à-coups du réseau ne modulent pas la vitesse.
+                self.fill = 0.995 * self.fill + 0.005 * level;
             }
         }
         let speed = drift_speed(self.fill);
@@ -611,8 +643,15 @@ impl AudioPlayer {
 }
 
 /// Vitesse de lecture selon le remplissage lissé du tampon (1.0 = à la cible).
+/// Aucune correction tant que le tampon reste à ±25 % de sa cible : la hauteur
+/// du son ne varie jamais pour rien.
 fn drift_speed(fill: f64) -> f64 {
-    1.0 + ((fill - 1.0) * MAX_DRIFT_CORRECTION).clamp(-MAX_DRIFT_CORRECTION, MAX_DRIFT_CORRECTION)
+    let error = fill - 1.0;
+    if error.abs() < DRIFT_DEADBAND {
+        return 1.0;
+    }
+    let error = error - DRIFT_DEADBAND.copysign(error);
+    1.0 + (error * MAX_DRIFT_CORRECTION).clamp(-MAX_DRIFT_CORRECTION, MAX_DRIFT_CORRECTION)
 }
 
 fn build_output(
@@ -673,22 +712,28 @@ where
 
 /// Convertit le son reçu vers la fréquence et le nombre de canaux de la sortie.
 ///
-/// Interpolation cubique (Catmull-Rom), état conservé d'un paquet à l'autre.
-/// `speed` accélère ou ralentit très légèrement la lecture pour compenser la
-/// dérive entre l'horloge de la carte son qui capture et celle qui joue.
+/// Interpolation par sinc fenêtré (Blackman, 32 points) avec filtre
+/// anti-repliement quand la fréquence baisse : qualité des logiciels audio
+/// professionnels. État conservé d'un paquet à l'autre. `speed` accélère ou
+/// ralentit très légèrement la lecture pour compenser la dérive entre l'horloge
+/// de la carte son qui capture et celle qui joue.
 struct Converter {
     out_rate: u32,
     out_channels: usize,
     in_rate: u32,
     in_channels: usize,
-    /// Trois dernières trames du paquet précédent (entrelacées).
+    /// Dernières trames du paquet précédent (entrelacées).
     history: Vec<f32>,
     /// Position de lecture, en trames, dans `history` + paquet courant.
     pos: f64,
+    /// Coefficients du filtre pour la position courante (réutilisés).
+    weights: Vec<f64>,
 }
 
-/// Trames gardées d'un paquet à l'autre pour l'interpolation.
-const HISTORY: usize = 3;
+/// Demi-largeur du filtre sinc, en trames d'entrée.
+const SINC_HALF: usize = 16;
+/// Trames gardées d'un paquet à l'autre pour le filtre.
+const HISTORY: usize = 2 * SINC_HALF;
 
 impl Converter {
     fn new(out_rate: u32, out_channels: u16) -> Self {
@@ -699,6 +744,7 @@ impl Converter {
             in_channels: 0,
             history: Vec::new(),
             pos: HISTORY as f64,
+            weights: vec![0.0; 2 * SINC_HALF],
         }
     }
 
@@ -718,11 +764,10 @@ impl Converter {
             .chunks_exact(in_channels)
             .flat_map(|input| {
                 (0..out_ch).map(move |c| {
-                    let to_f32 = |s: i16| s as f32 / 32768.0;
                     if out_ch == 1 && in_channels > 1 {
-                        input.iter().map(|&s| to_f32(s)).sum::<f32>() / in_channels as f32
+                        input.iter().sum::<f32>() / in_channels as f32
                     } else {
-                        to_f32(input[c % in_channels])
+                        input[c % in_channels]
                     }
                 })
             })
@@ -744,19 +789,32 @@ impl Converter {
             return mapped;
         }
 
-        // 3. Rééchantillonnage cubique sur l'historique suivi du paquet.
+        // 3. Rééchantillonnage par sinc fenêtré sur l'historique suivi du paquet.
         let mut src = Vec::with_capacity(self.history.len() + mapped.len());
         src.extend_from_slice(&self.history);
         src.extend_from_slice(&mapped);
         let total = src.len() / out_ch;
         let step = frame.rate as f64 / self.out_rate as f64 * speed;
+        // Fréquence de coupure (relative à la moitié de la fréquence d'entrée) :
+        // abaissée quand on réduit la fréquence, pour ne pas créer de repliement.
+        let cutoff = (1.0 / step).min(1.0);
         let mut out = Vec::with_capacity((frames as f64 / step) as usize * out_ch + out_ch);
-        while self.pos < (total - 2) as f64 {
+        while (self.pos.floor() as usize) + SINC_HALF < total {
             let i = self.pos.floor() as usize;
-            let t = (self.pos - i as f64) as f32;
+            let first = i + 1 - SINC_HALF;
+            let mut sum = 0.0;
+            for (tap, weight) in self.weights.iter_mut().enumerate() {
+                let x = self.pos - (first + tap) as f64;
+                *weight = sinc_kernel(x, cutoff);
+                sum += *weight;
+            }
             for c in 0..out_ch {
-                let p = |k: usize| src[k * out_ch + c];
-                out.push(catmull_rom(p(i - 1), p(i), p(i + 1), p(i + 2), t));
+                let mut acc = 0.0;
+                for (tap, weight) in self.weights.iter().enumerate() {
+                    acc += src[(first + tap) * out_ch + c] as f64 * weight;
+                }
+                // Normalisation : gain exactement 1 pour un signal continu.
+                out.push((acc / sum) as f32);
             }
             self.pos += step;
         }
@@ -766,24 +824,33 @@ impl Converter {
     }
 }
 
-fn catmull_rom(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
-    let t2 = t * t;
-    let t3 = t2 * t;
-    0.5 * (2.0 * p1
-        + (p2 - p0) * t
-        + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
-        + (3.0 * p1 - p0 - 3.0 * p2 + p3) * t3)
+/// Noyau sinc fenêtré (Blackman) de demi-largeur `SINC_HALF`.
+fn sinc_kernel(x: f64, cutoff: f64) -> f64 {
+    use std::f64::consts::PI;
+    let half = SINC_HALF as f64;
+    if x.abs() >= half {
+        return 0.0;
+    }
+    let sinc = if x.abs() < 1e-9 {
+        1.0
+    } else {
+        (PI * cutoff * x).sin() / (PI * cutoff * x)
+    };
+    let n = (x + half) / (2.0 * half);
+    let window = 0.42 - 0.5 * (2.0 * PI * n).cos() + 0.08 * (4.0 * PI * n).cos();
+    cutoff * sinc * window
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Paquet de test à partir d'échantillons 16 bits (plus lisibles).
     fn frame(rate: u32, channels: u16, samples: Vec<i16>) -> AudioFrame {
         AudioFrame {
             rate,
             channels,
-            samples,
+            samples: samples.into_iter().map(|s| s as f32 / 32768.0).collect(),
         }
     }
 
@@ -816,7 +883,8 @@ mod tests {
         for _ in 0..100 {
             total += conv.convert(&frame(44_100, 1, vec![1000; 441]), 1.0).len();
         }
-        assert!((47_990..=48_010).contains(&total), "{total}");
+        // Le filtre garde SINC_HALF trames en réserve (0,3 ms) pour regarder « en avant ».
+        assert!((47_970..=48_010).contains(&total), "{total}");
     }
 
     /// Sinus de 1 kHz à 44,1 kHz converti en 48 kHz par paquets de 10 ms :
@@ -843,12 +911,15 @@ mod tests {
             let ideal = 0.5 * (2.0 * std::f64::consts::PI * freq * t).sin();
             max_err = max_err.max((v as f64 - ideal).abs());
         }
-        assert!(max_err < 0.01, "erreur max {max_err}");
+        // Limité par la quantification 16 bits du signal de test (±0,00003).
+        assert!(max_err < 0.002, "erreur max {max_err}");
     }
 
     #[test]
     fn drift_correction_is_bounded() {
         assert_eq!(drift_speed(1.0), 1.0);
+        assert_eq!(drift_speed(1.2), 1.0, "zone neutre");
+        assert_eq!(drift_speed(0.8), 1.0, "zone neutre");
         assert!(drift_speed(1.5) > 1.0 && drift_speed(1.5) <= 1.0 + MAX_DRIFT_CORRECTION);
         assert!(drift_speed(0.5) < 1.0 && drift_speed(0.5) >= 1.0 - MAX_DRIFT_CORRECTION);
         assert_eq!(drift_speed(100.0), 1.0 + MAX_DRIFT_CORRECTION);
@@ -872,6 +943,23 @@ mod tests {
     }
 
     #[test]
+    fn playback_restarts_with_a_fade() {
+        let mut buf = PlayBuffer {
+            samples: VecDeque::new(),
+            primed: false,
+            prime_len: 4,
+            max_len: 100,
+            channels: 1,
+            underruns: 0,
+            fade_len: 4,
+            fade_left: 0,
+        };
+        buf.push(&[1.0; 8]);
+        let out: Vec<f32> = (0..6).map(|_| buf.pop()).collect();
+        assert_eq!(out, vec![0.0, 0.25, 0.5, 0.75, 1.0, 1.0]);
+    }
+
+    #[test]
     fn buffer_waits_then_drops_excess() {
         let mut buf = PlayBuffer {
             samples: VecDeque::new(),
@@ -880,6 +968,8 @@ mod tests {
             max_len: 8,
             channels: 2,
             underruns: 0,
+            fade_len: 0,
+            fade_left: 0,
         };
         buf.push(&[1.0, 1.0]);
         assert_eq!(buf.pop(), 0.0, "attend d'avoir assez de son");
