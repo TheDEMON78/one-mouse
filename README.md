@@ -34,6 +34,7 @@ Ce n'est **pas** du bureau à distance : aucune image n'est transmise, chaque PC
 - 🎙️ **Votre micro devient celui de l'autre PC** : Discord, Teams… l'utilisent sans réglage.
 - 🎯 **Vitesse de la souris réglable** sur l'autre PC, si les deux n'ont pas la même sensibilité.
 - 🔒 **Connexion chiffrée** par mot de passe (Argon2id, ChaCha20-Poly1305).
+- 📶 **Par le réseau ou par Bluetooth** : câble ou Wi-Fi (recommandé), ou liaison Bluetooth directe entre les deux PC.
 - 🪟 **Reste dans la barre des tâches** (Windows) : fermer la fenêtre garde one-mouse près de l'horloge.
 - 🚀 **Démarrage automatique** à l'ouverture de session, partage lancé tout seul.
 - 📦 **Installateurs** générés automatiquement à chaque version.
@@ -69,6 +70,20 @@ Les réglages sont enregistrés. Les options « Démarrer le partage à l'ouvert
 l'ouverture de session » rendent tout automatique. Sous Windows, one-mouse démarre alors directement dans la zone de
 notification ; fermer la fenêtre l'y garde (clic sur l'icône pour la rouvrir, clic droit → **Quitter** pour fermer).
 
+## Liaison par Bluetooth
+
+Sans réseau commun, les deux PC peuvent se relier directement en Bluetooth (« réseau personnel », PAN). Choisissez
+**Bluetooth** dans « Liaison entre les deux PC » (onglet Connexion), puis :
+
+1. Associez les deux PC : *Paramètres → Bluetooth → Ajouter un appareil* (une seule fois).
+2. Sur un des PC — Windows : icône Bluetooth près de l'horloge → *Rejoindre un réseau personnel* → l'autre PC →
+   *Se connecter en → Connexion directe*. Linux : *Paramètres Bluetooth → l'autre PC → Réseau (PAN)*.
+3. L'« Adresse Bluetooth de ce PC » s'affiche en haut de l'onglet Connexion : saisissez-la sur l'autre PC.
+
+Le débit du Bluetooth (1 à 2 Mbit/s) ne permet pas le son sans perte : il est compressé automatiquement (Opus
+256 kbit/s, micro 64 kbit/s), avec un peu plus de latence et une portée d'une dizaine de mètres. Une liaison
+Bluetooth est aussi détectée automatiquement (option `--bluetooth` en ligne de commande).
+
 ## Son et micro
 
 - **PC principal** : cochez « Ce PC est mon PC principal » sur le PC où sont branchés la souris, le clavier et le
@@ -80,6 +95,9 @@ notification ; fermer la fenêtre l'y garde (clic sur l'icône pour la rouvrir, 
   - Windows et macOS : il faut un pilote gratuit, [VB-Cable](https://vb-audio.com/Cable/) ou
     [BlackHole](https://existential.audio/blackhole/) (bouton « Installer le micro virtuel » dans l'onglet Son).
   - Sans micro virtuel, le micro reçu n'est pas joué sur les haut-parleurs (il reviendrait en écho).
+  - L'onglet Connexion indique en direct le micro envoyé, et sur l'autre PC si le micro reçu est bien devenu le
+    micro par défaut (sinon : quoi installer ou choisir).
+  - Le PC principal n'envoie jamais un micro virtuel resté par défaut : il prend alors son vrai micro.
 - Sans PC principal, le son n'est envoyé que par le PC contrôlé, et le micro que par celui qui contrôle : un seul sens
   à la fois, donc jamais d'écho.
 - **Qualité** : par défaut, son **sans perte** (~3 Mbit/s en stéréo), mesuré de bout en bout à 71,6 dB de rapport

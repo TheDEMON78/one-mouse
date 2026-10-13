@@ -22,6 +22,17 @@ pub fn switch_to_virtual(output: &str) -> Option<DefaultMicGuard> {
     guard
 }
 
+/// Nom, vu par les applications, du micro virtuel qui ressort la sortie `output`.
+pub fn virtual_mic_name(output: &str) -> String {
+    if output == "one_mouse_mic" {
+        "Micro-one-mouse".to_owned()
+    } else if output.to_lowercase().contains("cable input") {
+        "CABLE Output".to_owned()
+    } else {
+        output.to_owned()
+    }
+}
+
 impl Drop for DefaultMicGuard {
     fn drop(&mut self) {
         imp::restore(&self.previous);

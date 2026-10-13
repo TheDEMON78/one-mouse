@@ -77,6 +77,8 @@ pub struct Settings {
     pub sound_quality: crate::codec::Quality,
     /// Démarre le partage dès l'ouverture de la fenêtre.
     pub start_sharing: bool,
+    /// Liaison par Bluetooth (réseau personnel) plutôt que par le réseau local.
+    pub bluetooth: bool,
     /// Windows : fermer la fenêtre la garde dans la zone de notification.
     pub tray: bool,
     /// Version du format, pour adapter les anciens réglages (absent = ancien format 0).
@@ -105,6 +107,7 @@ impl Default for Settings {
             mic_device: String::new(),
             sound_quality: crate::codec::Quality::Lossless,
             start_sharing: false,
+            bluetooth: false,
             tray: true,
             format: FORMAT,
         }
@@ -184,6 +187,9 @@ impl Settings {
         }
         if self.main {
             args.push("--main".to_owned());
+        }
+        if self.bluetooth {
+            args.push("--bluetooth".to_owned());
         }
         if self.sound_quality != crate::codec::Quality::Lossless {
             args.push("--sound-quality".to_owned());

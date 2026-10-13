@@ -16,6 +16,7 @@ mod crypto;
 mod default_mic;
 mod firewall;
 mod gui;
+mod network;
 mod powershell;
 mod protocol;
 mod session;
@@ -103,6 +104,11 @@ struct Cli {
     /// compressed (Opus, Wi-Fi faible).
     #[arg(long, value_enum, global = true, default_value = "lossless")]
     sound_quality: codec::Quality,
+
+    /// Les deux PC sont reliés par Bluetooth (réseau personnel) : son compressé
+    /// pour tenir dans son débit. Détecté aussi automatiquement.
+    #[arg(long, global = true)]
+    bluetooth: bool,
 
     /// Source du son à envoyer (par défaut : la sortie audio principale).
     #[arg(long, global = true, value_name = "PÉRIPHÉRIQUE")]
@@ -243,6 +249,7 @@ async fn run(cli: Cli, mode: Mode) -> Result<()> {
             sound_output: cli.sound_output,
             mic_output: cli.mic_output,
             quality: cli.sound_quality,
+            bluetooth: cli.bluetooth,
         },
     };
 

@@ -97,7 +97,20 @@ enum EncoderKind {
 }
 
 impl AudioEncoder {
+    #[cfg(test)]
     pub fn new(kind: AudioKind, quality: Quality) -> Result<Self> {
+        Self::for_link(kind, quality, false)
+    }
+
+    /// `bluetooth` : liaison Bluetooth (1 à 2 Mbit/s en tout). Le son y est
+    /// toujours compressé, à un débit qui laisse de la marge : 256 kbit/s en
+    /// stéréo et 64 kbit/s pour le micro restent transparents avec Opus.
+    pub fn for_link(kind: AudioKind, quality: Quality, bluetooth: bool) -> Result<Self> {
+        let quality = if bluetooth {
+            Quality::Compressed
+        } else {
+            quality
+        };
         let inner = match quality {
             Quality::Lossless => EncoderKind::Pcm {
                 pending: Vec::new(),
@@ -113,9 +126,11 @@ impl AudioEncoder {
                     AudioKind::Mic => Application::Voip,
                 };
                 let mut encoder = Encoder::new(OPUS_RATE, opus_channels(channels), application)?;
-                let bitrate = match kind {
-                    AudioKind::Sound => 510_000,
-                    AudioKind::Mic => 128_000,
+                let bitrate = match (kind, bluetooth) {
+                    (AudioKind::Sound, false) => 510_000,
+                    (AudioKind::Mic, false) => 128_000,
+                    (AudioKind::Sound, true) => 256_000,
+                    (AudioKind::Mic, true) => 64_000,
                 };
                 encoder.set_bitrate(Bitrate::Bits(bitrate))?;
                 encoder.set_vbr(false)?;

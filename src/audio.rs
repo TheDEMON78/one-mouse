@@ -102,6 +102,8 @@ pub struct AudioConfig {
     pub mic_output: Option<String>,
     /// Qualité de transport du son envoyé.
     pub quality: crate::codec::Quality,
+    /// Liaison Bluetooth choisie : son compressé quel que soit `quality`.
+    pub bluetooth: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,20 +159,29 @@ fn is_bluetooth_name(text: &str) -> bool {
     .any(|word| text.contains(word))
 }
 
-/// Vrai micro utilisable à la place d'un micro Bluetooth : ni Bluetooth, ni
-/// son d'une sortie (« monitor »), ni micro virtuel.
+/// Micro virtuel (one-mouse, VB-Cable, BlackHole) ou son d'une sortie (« monitor »).
+fn is_virtual_name(text: &str) -> bool {
+    [
+        "monitor",
+        "one_mouse",
+        "one-mouse",
+        "cable output",
+        "blackhole",
+        "vb-audio",
+    ]
+    .iter()
+    .any(|word| text.contains(word))
+}
+
+fn is_virtual_mic(device: &Device) -> bool {
+    let text = format!("{} {}", device_label(device), id_string(device)).to_lowercase();
+    is_virtual_name(&text)
+}
+
+/// Vrai micro utilisable à la place d'un micro Bluetooth ou virtuel.
 fn is_plain_mic(device: &Device) -> bool {
     let text = format!("{} {}", device_label(device), id_string(device)).to_lowercase();
-    !is_bluetooth_name(&text)
-        && ![
-            "monitor",
-            "one_mouse",
-            "cable output",
-            "blackhole",
-            "vb-audio",
-        ]
-        .iter()
-        .any(|word| text.contains(word))
+    !is_bluetooth_name(&text) && !is_virtual_name(&text)
 }
 
 /// Trouve un périphérique par son nom (même partiel, sans tenir compte de la casse) ou son identifiant.
@@ -330,6 +341,18 @@ fn capture_device(
     match source {
         Source::Microphone => {
             let mut device = host.default_input_device().context("aucun micro trouvé")?;
+            if is_virtual_mic(&device) {
+                // Micro virtuel resté par défaut (micro reçu de l'autre PC) : envoyer
+                // ce micro renverrait du silence, ou l'autre PC à lui-même.
+                if let Some(other) = host.input_devices()?.find(is_plain_mic) {
+                    log::info!(
+                        "micro par défaut « {} » virtuel, « {} » envoyé à la place",
+                        device_label(&device),
+                        device_label(&other)
+                    );
+                    device = other;
+                }
+            }
             if is_bluetooth_mic(&device) {
                 // Ouvrir le micro d'un casque Bluetooth le bascule en « mode
                 // téléphone » : tout son son passe en mono 16 kHz, qualité radio.
@@ -386,6 +409,8 @@ fn system_loopback(host: &Host) -> Result<(Device, SupportedStreamConfig)> {
 /// Capture audio en cours. S'arrête quand l'objet est détruit.
 pub struct AudioCapture {
     pub frames: mpsc::Receiver<AudioFrame>,
+    /// Nom du périphérique capturé.
+    pub label: String,
     _stop: std_mpsc::Sender<()>,
 }
 
@@ -423,6 +448,7 @@ impl AudioCapture {
         log::info!("capture audio : {label}");
         Ok(Self {
             frames,
+            label,
             _stop: stop_tx,
         })
     }
@@ -1028,6 +1054,9 @@ mod tests {
         assert!(is_bluetooth_name("casque (wh-1000xm4 hands-free ag audio)"));
         assert!(is_bluetooth_name("bluez_input.aa_bb_cc.headset-head-unit"));
         assert!(!is_bluetooth_name("microphone (realtek(r) audio)"));
+        assert!(is_virtual_name("cable output (vb-audio virtual cable)"));
+        assert!(is_virtual_name("micro-one-mouse one_mouse_micro"));
+        assert!(!is_virtual_name("microphone (realtek(r) audio)"));
     }
 
     #[test]

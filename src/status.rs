@@ -54,6 +54,53 @@ impl Status {
     }
 }
 
+/// État du micro, sur des lignes `@mic <état>` distinctes.
+pub const MIC_PREFIX: &str = "@mic ";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MicStatus {
+    /// Ce PC envoie ce micro à l'autre PC.
+    Sending(String),
+    /// Micro de l'autre PC reçu dans ce micro virtuel, devenu le micro par défaut.
+    Default(String),
+    /// Reçu dans ce micro virtuel, mais le micro par défaut n'a pas pu être changé.
+    NotDefault(String),
+    /// Micro de l'autre PC reçu, mais aucun micro virtuel pour le recevoir.
+    NoVirtual,
+}
+
+impl MicStatus {
+    fn encode(&self) -> String {
+        match self {
+            MicStatus::Sending(name) => format!("sending {name}"),
+            MicStatus::Default(name) => format!("default {name}"),
+            MicStatus::NotDefault(name) => format!("notdefault {name}"),
+            MicStatus::NoVirtual => "novirtual".into(),
+        }
+    }
+
+    pub fn parse(line: &str) -> Option<Self> {
+        let rest = line.strip_prefix(MIC_PREFIX)?;
+        let (kind, arg) = rest.split_once(' ').unwrap_or((rest, ""));
+        let arg = arg.to_owned();
+        Some(match kind {
+            "sending" => MicStatus::Sending(arg),
+            "default" => MicStatus::Default(arg),
+            "notdefault" => MicStatus::NotDefault(arg),
+            "novirtual" => MicStatus::NoVirtual,
+            _ => return None,
+        })
+    }
+}
+
+pub fn emit_mic(status: MicStatus) {
+    if ENABLED.load(Ordering::Relaxed) {
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{MIC_PREFIX}{}", status.encode().replace('\n', " "));
+        let _ = out.flush();
+    }
+}
+
 pub fn enable() {
     ENABLED.store(true, Ordering::Relaxed);
 }
@@ -85,5 +132,18 @@ mod tests {
             assert_eq!(Status::parse(&line), Some(status));
         }
         assert_eq!(Status::parse("autre chose"), None);
+    }
+
+    #[test]
+    fn mic_roundtrip() {
+        for status in [
+            MicStatus::Sending("Micro (Realtek Audio)".into()),
+            MicStatus::Default("CABLE Output".into()),
+            MicStatus::NotDefault("CABLE Output".into()),
+            MicStatus::NoVirtual,
+        ] {
+            let line = format!("{MIC_PREFIX}{}", status.encode());
+            assert_eq!(MicStatus::parse(&line), Some(status));
+        }
     }
 }

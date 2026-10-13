@@ -24,7 +24,7 @@ use crate::codec::{AudioDecoder, AudioEncoder, Quality};
 use crate::crypto::{self, Psk, Role, UdpCrypto};
 use crate::default_mic;
 use crate::protocol::{AudioFormat, AudioKind, MAX_CLIPBOARD_LEN, Message, PeerInfo};
-use crate::status::{self, Status};
+use crate::status::{self, MicStatus, Status};
 
 /// Identifiant de l'unique autre PC (la V1 gère une seule connexion).
 const PEER: u64 = 0;
@@ -77,6 +77,8 @@ struct State {
 pub async fn run(stream: TcpStream, role: Role, local: &mut Local) -> Result<()> {
     stream.set_nodelay(true)?;
     let peer_ip = stream.peer_addr()?.ip();
+    let bluetooth =
+        local.audio.bluetooth || crate::network::is_bluetooth_ip(stream.local_addr()?.ip());
     let (reader, writer) = stream.into_split();
     let (mut reader, mut writer, peer, udp_crypto) = tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
@@ -99,6 +101,10 @@ pub async fn run(stream: TcpStream, role: Role, local: &mut Local) -> Result<()>
         side_name(local.peer_side),
         if peer.main { ", PC principal" } else { "" }
     );
+    if bluetooth {
+        log::info!("liaison Bluetooth : son compressé (Opus) pour tenir dans son débit");
+    }
+    let link = (local.audio.quality, bluetooth);
 
     let (out_tx, mut out_rx) = mpsc::channel::<Message>(1024);
     let (in_tx, mut in_rx) = mpsc::channel::<Message>(1024);
@@ -145,7 +151,7 @@ pub async fn run(stream: TcpStream, role: Role, local: &mut Local) -> Result<()>
     };
 
     status::emit(Status::Connected(peer.name.clone()));
-    let result = event_loop(local, peer, udp, &out_tx, &mut in_rx).await;
+    let result = event_loop(local, peer, udp, &out_tx, &mut in_rx, link).await;
 
     // Toujours rendre le curseur et relâcher les touches, même en cas d'erreur.
     if let Some(capture) = &mut local.capture {
@@ -173,6 +179,7 @@ async fn event_loop(
     mut udp: Udp,
     out: &mpsc::Sender<Message>,
     incoming: &mut mpsc::Receiver<Message>,
+    link: (Quality, bool),
 ) -> Result<()> {
     let mut state = State {
         peer_name: peer.name,
@@ -233,11 +240,11 @@ async fn event_loop(
             }
             _ = probe.tick() => udp.probe(),
             frame = recv_frame(&mut audio.sound) => match frame {
-                Some(frame) => send_audio(&mut audio.sound, AudioKind::Sound, local.audio.quality, &frame, &mut udp, out),
+                Some(frame) => send_audio(&mut audio.sound, AudioKind::Sound, link, &frame, &mut udp, out),
                 None => audio.sound.capture_stopped(),
             },
             frame = recv_frame(&mut audio.mic) => match frame {
-                Some(frame) => send_audio(&mut audio.mic, AudioKind::Mic, local.audio.quality, &frame, &mut udp, out),
+                Some(frame) => send_audio(&mut audio.mic, AudioKind::Mic, link, &frame, &mut udp, out),
                 None => audio.mic.capture_stopped(),
             },
             Some(text) = recv_clipboard(&mut local.clipboard) => {
@@ -309,13 +316,13 @@ impl Udp {
 fn send_audio(
     link: &mut AudioLink,
     kind: AudioKind,
-    quality: Quality,
+    (quality, bluetooth): (Quality, bool),
     frame: &AudioFrame,
     udp: &mut Udp,
     out: &mpsc::Sender<Message>,
 ) {
     if link.encoder.is_none() {
-        match AudioEncoder::new(kind, quality) {
+        match AudioEncoder::for_link(kind, quality, bluetooth) {
             Ok(encoder) => link.encoder = Some(encoder),
             Err(e) => {
                 log::warn!("compression du son impossible : {e:#}");
@@ -397,7 +404,12 @@ impl AudioLink {
             return;
         }
         match AudioCapture::start(source, device) {
-            Ok(capture) => self.capture = Some(capture),
+            Ok(capture) => {
+                if source == Source::Microphone {
+                    status::emit_mic(MicStatus::Sending(capture.label.clone()));
+                }
+                self.capture = Some(capture);
+            }
             Err(e) => {
                 log::warn!("partage audio désactivé ({source:?}) : {e:#}");
                 self.capture_failed = true;
@@ -608,6 +620,12 @@ async fn on_message(
                             Some(output) => {
                                 log::info!("micro de l'autre PC disponible via « {output} »");
                                 audio._default_mic = default_mic::switch_to_virtual(&output);
+                                let name = default_mic::virtual_mic_name(&output);
+                                status::emit_mic(if audio._default_mic.is_some() {
+                                    MicStatus::Default(name)
+                                } else {
+                                    MicStatus::NotDefault(name)
+                                });
                                 audio.mic_output = Some(output);
                             }
                             None => {
@@ -615,6 +633,7 @@ async fn on_message(
                                     "micro de l'autre PC ignoré : aucun micro virtuel. Installez VB-Cable \
                                      (Windows, vb-audio.com/Cable) ou BlackHole (macOS), puis redémarrez le partage"
                                 );
+                                status::emit_mic(MicStatus::NoVirtual);
                                 audio.mic.player_failed = true;
                             }
                         }
@@ -676,6 +695,7 @@ mod tests {
             sound_output: None,
             mic_output: None,
             quality: Quality::Lossless,
+            bluetooth: false,
         }
     }
 

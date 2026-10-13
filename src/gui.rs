@@ -17,9 +17,9 @@ use eframe::egui;
 use crate::audio::{self, Mode};
 use crate::codec::Quality;
 use crate::settings::{Settings, Side};
-use crate::status::Status;
+use crate::status::{MicStatus, Status};
 use crate::tray::Tray;
-use crate::{autostart, crypto, firewall};
+use crate::{autostart, crypto, firewall, network};
 
 const ICON_PNG: &[u8] = include_bytes!("../assets/icons/256x256.png");
 const MAX_LOG_LINES: usize = 300;
@@ -50,6 +50,8 @@ pub fn run(hidden: bool) -> Result<()> {
 #[derive(Default)]
 struct Shared {
     status: Option<Status>,
+    /// État du micro (envoyé, reçu…) pendant la connexion.
+    mic: Option<MicStatus>,
     log: VecDeque<String>,
 }
 
@@ -99,9 +101,18 @@ impl Engine {
             std::thread::spawn(move || {
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                     let mut shared = shared.lock().expect("verrou");
-                    match Status::parse(&line) {
-                        Some(status) => shared.status = Some(status),
-                        None => shared.push_log(line),
+                    if let Some(status) = Status::parse(&line) {
+                        if matches!(
+                            status,
+                            Status::Listening | Status::Connecting | Status::Error(_)
+                        ) {
+                            shared.mic = None;
+                        }
+                        shared.status = Some(status);
+                    } else if let Some(mic) = MicStatus::parse(&line) {
+                        shared.mic = Some(mic);
+                    } else {
+                        shared.push_log(line);
                     }
                     ctx.request_repaint();
                 }
@@ -186,6 +197,9 @@ struct App {
     outputs: Vec<String>,
     inputs: Vec<String>,
     local_ip: Option<IpAddr>,
+    /// Adresse de ce PC sur la liaison Bluetooth, revérifiée régulièrement.
+    bluetooth_ip: Option<IpAddr>,
+    bluetooth_checked: Instant,
     error: Option<String>,
     logo: egui::TextureHandle,
     tab: Tab,
@@ -221,6 +235,8 @@ impl App {
             outputs: audio::output_names(),
             inputs: audio::input_names(),
             local_ip: local_ip(),
+            bluetooth_ip: network::bluetooth_ip(),
+            bluetooth_checked: Instant::now(),
             error: None,
             logo,
             tab: Tab::Connection,
@@ -274,6 +290,7 @@ impl App {
         {
             let mut shared = self.shared.lock().expect("verrou");
             shared.status = None;
+            shared.mic = None;
             shared.log.clear();
         }
         match Engine::start(&self.settings, self.shared.clone(), ctx.clone()) {
@@ -398,10 +415,31 @@ impl App {
                 ui.label(egui::RichText::new(short).strong().size(17.0).color(TEXT));
             });
             ui.label(egui::RichText::new(detail).color(MUTED));
-            if let Some(ip) = self.local_ip {
+            if self.settings.bluetooth && self.bluetooth_checked.elapsed() > Duration::from_secs(3)
+            {
+                // La liaison Bluetooth peut s'établir pendant que la fenêtre est ouverte.
+                self.bluetooth_ip = network::bluetooth_ip();
+                self.bluetooth_checked = Instant::now();
+                ui.ctx().request_repaint_after(Duration::from_secs(3));
+            }
+            let (address, label) = if self.settings.bluetooth {
+                (self.bluetooth_ip, "Adresse Bluetooth de ce PC")
+            } else {
+                (self.local_ip, "Adresse de ce PC")
+            };
+            if self.settings.bluetooth && address.is_none() {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Pas encore de liaison Bluetooth entre les deux PC (voir les étapes ci-dessous).",
+                    )
+                    .color(ORANGE),
+                );
+            }
+            if let Some(ip) = address {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Adresse de ce PC").color(MUTED));
+                    ui.label(egui::RichText::new(label).color(MUTED));
                     ui.label(
                         egui::RichText::new(ip.to_string())
                             .monospace()
@@ -412,6 +450,13 @@ impl App {
                         ui.ctx().copy_text(ip.to_string());
                     }
                 });
+            }
+            if running {
+                let mic = self.shared.lock().expect("verrou").mic.clone();
+                if let Some(mic) = mic {
+                    ui.add_space(4.0);
+                    mic_line(ui, &mic);
+                }
             }
         });
 
@@ -437,13 +482,42 @@ impl App {
                 });
                 if s.connect {
                     ui.add_space(4.0);
-                    field(ui, "Adresse de l'autre PC", |ui| {
+                    let (label, hint) = if s.bluetooth {
+                        ("Adresse Bluetooth de l'autre PC", "169.254.12.34")
+                    } else {
+                        ("Adresse de l'autre PC", "192.168.1.20")
+                    };
+                    field(ui, label, |ui| {
                         ui.add(
                             egui::TextEdit::singleline(&mut s.address)
-                                .hint_text("192.168.1.20")
+                                .hint_text(hint)
                                 .desired_width(f32::INFINITY),
                         );
                     });
+                }
+            });
+
+            card(ui, |ui| {
+                section_title(ui, "Liaison entre les deux PC");
+                ui.columns(2, |cols| {
+                    choice_tile(
+                        &mut cols[0],
+                        &mut s.bluetooth,
+                        false,
+                        "Réseau (câble ou Wi-Fi)",
+                        "Recommandé : son sans perte",
+                    );
+                    choice_tile(
+                        &mut cols[1],
+                        &mut s.bluetooth,
+                        true,
+                        "Bluetooth",
+                        "Sans réseau, son compressé",
+                    );
+                });
+                if s.bluetooth {
+                    ui.add_space(6.0);
+                    bluetooth_steps(ui);
                 }
             });
 
@@ -619,6 +693,16 @@ impl App {
                     .small()
                     .color(MUTED),
                 );
+                if self.settings.bluetooth {
+                    ui.label(
+                        egui::RichText::new(
+                            "Liaison Bluetooth choisie : le son est compressé automatiquement \
+                             pour tenir dans son débit.",
+                        )
+                        .small()
+                        .color(ORANGE),
+                    );
+                }
             });
         });
         if ui
@@ -771,6 +855,46 @@ impl App {
 }
 
 /// Ouvre une page dans le navigateur.
+/// Ligne d'état du micro dans l'onglet Connexion.
+fn mic_line(ui: &mut egui::Ui, mic: &MicStatus) {
+    let (color, text) = match mic {
+        MicStatus::Sending(name) => (GREEN, format!("Micro envoyé à l'autre PC : « {name} »")),
+        MicStatus::Default(name) => (
+            GREEN,
+            format!("Micro de l'autre PC reçu : « {name} » est le micro par défaut de ce PC"),
+        ),
+        MicStatus::NotDefault(name) => (
+            ORANGE,
+            format!(
+                "Micro de l'autre PC reçu dans « {name} », mais il n'a pas pu devenir le micro \
+                 par défaut : choisissez « {name} » comme micro dans Windows ou vos applications"
+            ),
+        ),
+        MicStatus::NoVirtual => (
+            RED,
+            "Micro de l'autre PC reçu mais inutilisable : aucun micro virtuel sur ce PC. \
+             Vos applications utilisent encore le micro de ce PC."
+                .to_owned(),
+        ),
+    };
+    ui.label(egui::RichText::new(text).color(color));
+    if *mic == MicStatus::NoVirtual {
+        let (name, url) = if cfg!(target_os = "macos") {
+            ("BlackHole", "https://existential.audio/blackhole/")
+        } else {
+            ("VB-Cable", "https://vb-audio.com/Cable/")
+        };
+        if ui
+            .button(format!(
+                "Installer le micro virtuel ({name}), puis redémarrer le PC"
+            ))
+            .clicked()
+        {
+            open_url(url);
+        }
+    }
+}
+
 fn open_url(url: &str) {
     let result = if cfg!(windows) {
         std::process::Command::new("explorer").arg(url).spawn()
@@ -904,6 +1028,42 @@ fn status_pill(ui: &mut egui::Ui, color: egui::Color32, text: &str) {
 }
 
 /// Grande vignette cliquable pour un choix entre deux options.
+/// Étapes pour relier les deux PC par Bluetooth (réseau personnel).
+fn bluetooth_steps(ui: &mut egui::Ui) {
+    let step = |ui: &mut egui::Ui, n: &str, text: &str| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new(n).strong().color(ACCENT));
+            ui.label(egui::RichText::new(text).color(TEXT));
+        });
+    };
+    step(
+        ui,
+        "1.",
+        "Associez les deux PC : Paramètres → Bluetooth → Ajouter un appareil (une seule fois).",
+    );
+    step(
+        ui,
+        "2.",
+        "Sur un des PC, Windows : icône Bluetooth près de l'horloge → « Rejoindre un réseau \
+         personnel » → l'autre PC → Se connecter en → Connexion directe. Linux : Paramètres \
+         Bluetooth → l'autre PC → Réseau (PAN).",
+    );
+    step(
+        ui,
+        "3.",
+        "L'« Adresse Bluetooth de ce PC » s'affiche en haut : saisissez-la sur l'autre PC.",
+    );
+    ui.label(
+        egui::RichText::new(
+            "Débit du Bluetooth limité (1 à 2 Mbit/s) : le son est compressé (Opus 256 kbit/s), \
+             avec un peu plus de latence, et la portée est d'une dizaine de mètres. Le réseau \
+             local reste le meilleur choix pour un son parfait.",
+        )
+        .small()
+        .color(MUTED),
+    );
+}
+
 fn choice_tile(ui: &mut egui::Ui, value: &mut bool, option: bool, title: &str, detail: &str) {
     let selected = *value == option;
     let response = egui::Frame::new()
