@@ -239,6 +239,8 @@ struct App {
     /// Autre PC dont l'adresse Bluetooth a été apprise par le réseau.
     bluetooth_peer: Option<crate::bluetooth::KnownPeer>,
     error: Option<String>,
+    /// Message de réussite d'une action (effacé par la suivante).
+    notice: Option<String>,
     logo: egui::TextureHandle,
     tab: Tab,
     /// Icône de la zone de notification (Windows).
@@ -288,6 +290,7 @@ impl App {
             bluetooth_peer: crate::bluetooth::known_peer(),
             bluetooth_checked: Instant::now(),
             error: None,
+            notice: None,
             logo,
             tab: Tab::Connection,
             tray: Tray::new(cc, ICON_PNG),
@@ -1148,13 +1151,54 @@ impl App {
                          une fois par le réseau pour connaître son adresse.",
                     );
             });
-            if let Some(peer) = crate::wake::known_peer()
-                && ui
+            if let Some(peer) = crate::wake::known_peer() {
+                if ui
                     .button(format!("Réveiller « {} » maintenant", peer.name))
                     .clicked()
-                && crate::wake::send(peer.mac).is_err()
+                    && crate::wake::send(&peer.macs).is_err()
+                {
+                    self.error = Some("Envoi du signal de réveil impossible.".into());
+                }
+                if !peer.wired {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "« {} » n'est relié qu'en Wi-Fi : il ne pourra sans doute pas être \
+                             réveillé. Branchez-le par câble (Ethernet).",
+                            peer.name
+                        ))
+                        .small()
+                        .color(ORANGE),
+                    );
+                }
+            }
+            if ui
+                .button("Préparer ce PC à être réveillé")
+                .on_hover_text(
+                    "À faire une fois sur le PC à réveiller (droits d'administrateur) : \
+                     active le réveil par le réseau sur ses cartes filaires. Sous Windows, \
+                     désactive aussi le démarrage rapide, sans quoi un PC éteint ne se \
+                     réveille pas. Selon le PC, le réveil par le réseau (Wake on LAN) doit \
+                     aussi être activé dans le BIOS.",
+                )
+                .clicked()
             {
-                self.error = Some("Envoi du signal de réveil impossible.".into());
+                match crate::wake::prepare_this_pc() {
+                    Some(Ok(())) => {
+                        self.error = None;
+                        self.notice = Some("Ce PC peut maintenant être réveillé à distance.".into());
+                    }
+                    Some(Err(e)) => {
+                        self.notice = None;
+                        self.error = Some(format!("Réveil à distance : {e:#}"));
+                    }
+                    None => {
+                        self.error = Some(
+                            "Sur ce système, activez le réveil par le réseau dans les réglages \
+                             de la carte réseau."
+                                .into(),
+                        )
+                    }
+                }
             }
         });
         self.update_card(ui);
@@ -1792,6 +1836,8 @@ impl eframe::App for App {
             .show(ui, |ui| {
                 if let Some(error) = &self.error {
                     ui.label(egui::RichText::new(error).color(RED));
+                } else if let Some(notice) = &self.notice {
+                    ui.label(egui::RichText::new(notice).color(GREEN));
                 }
                 if running {
                     ui.label(

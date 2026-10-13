@@ -4,7 +4,7 @@ use input_event::{Event, KeyboardEvent, PointerEvent};
 use serde::{Deserialize, Serialize};
 
 /// Version du protocole, incrémentée à chaque changement incompatible.
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// Taille maximale d'un texte de presse-papier synchronisé (512 Kio).
 pub const MAX_CLIPBOARD_LEN: usize = 512 * 1024;
@@ -71,8 +71,9 @@ pub enum Message {
     FileEnd { id: u32 },
     /// L'émetteur vient d'être verrouillé : verrouiller aussi ce PC.
     Lock,
-    /// Adresse MAC de la carte réseau de l'émetteur, pour le réveiller à distance.
-    WakeAddress([u8; 6]),
+    /// Adresses MAC des cartes réseau de l'émetteur, pour le réveiller à
+    /// distance ; `wired` : l'une d'elles est filaire.
+    WakeAddresses { macs: Vec<[u8; 6]>, wired: bool },
 }
 
 /// Ce que chaque PC annonce de lui-même à la connexion.

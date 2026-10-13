@@ -44,7 +44,7 @@ Ce n'est **pas** du bureau à distance : aucune image n'est transmise, chaque PC
 - 🪟 **Reste dans la barre des tâches** (Windows) : fermer la fenêtre garde one-mouse près de l'horloge.
 - 🔒 **Verrouillage commun** : verrouiller un PC (Windows+L) verrouille l'autre ; aucun ne s'endort pendant la
   connexion.
-- ⏰ **Réveil à distance** : au démarrage du partage, l'autre PC en veille est réveillé par le réseau (Wake-on-LAN).
+- ⏰ **Réveil à distance** : au démarrage du partage, l'autre PC en veille est réveillé par le réseau (Wake-on-LAN, voir [Réveil à distance](#réveil-à-distance)).
 - 🚀 **Démarrage automatique** à l'ouverture de session, partage lancé tout seul.
 - 📦 **Installateurs** générés automatiquement à chaque version.
 
@@ -148,6 +148,26 @@ adresse.
 - **Casque Bluetooth** : utiliser son micro le fait passer en « mode téléphone » (son mono, qualité radio). Avec
   « micro par défaut », one-mouse prend automatiquement un autre micro (intégré au PC, webcam…) s'il en existe un.
 - **Windows** : pour un son fidèle, désactivez « Son spatial » et les « Améliorations audio » du casque.
+
+## Réveil à distance
+
+Le Wake-on-LAN demande un réglage **sur le PC à réveiller** :
+
+1. Connectez une fois les deux PC par le réseau : chacun mémorise les adresses
+   des cartes réseau de l'autre.
+2. Sur le PC à réveiller, **Options → « Préparer ce PC à être réveillé »**
+   (droits d'administrateur) :
+   - Windows : réveil par paquet magique activé sur les cartes réseau (et
+     autorisé dans le gestionnaire de périphériques), démarrage rapide
+     désactivé (sinon un PC « éteint » ne se réveille pas) ;
+   - Linux : réveil par paquet magique activé sur les connexions filaires de
+     NetworkManager.
+3. Selon la carte mère, activez aussi *Wake on LAN* / *Power On by PCI-E* dans
+   le BIOS (nécessaire surtout pour un PC éteint).
+
+Le PC à réveiller doit être relié **par câble** (Ethernet) : en Wi-Fi, le
+réveil ne fonctionne presque jamais. Les deux PC doivent être sur le même
+réseau local.
 
 ## Pare-feu
 

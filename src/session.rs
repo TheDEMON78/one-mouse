@@ -161,7 +161,7 @@ pub async fn run(stream: TcpStream, role: Role, local: &mut Local) -> Result<()>
     // sans perte.
     let local_ip = stream.local_addr()?.ip();
     let via_bluetooth = crate::network::is_bluetooth_ip(local_ip);
-    let mac = crate::wake::local_mac(local_ip);
+    let mac = Some(crate::wake::local_macs(local_ip));
     run_on(stream, Some(peer_ip), via_bluetooth, mac, role, local).await
 }
 
@@ -173,7 +173,7 @@ pub async fn run_on<S>(
     stream: S,
     peer_ip: Option<std::net::IpAddr>,
     via_bluetooth: bool,
-    mac: Option<[u8; 6]>,
+    mac: Option<(Vec<[u8; 6]>, bool)>,
     role: Role,
     local: &mut Local,
 ) -> Result<()>
@@ -275,8 +275,10 @@ where
         send(&out_tx, Message::BluetoothAddress(address)).await?;
     }
     // Adresse MAC de ce PC : l'autre pourra le réveiller à distance.
-    if let Some(mac) = mac {
-        send(&out_tx, Message::WakeAddress(mac)).await?;
+    if let Some((macs, wired)) = mac
+        && !macs.is_empty()
+    {
+        send(&out_tx, Message::WakeAddresses { macs, wired }).await?;
     }
     CONNECTED.store(true, std::sync::atomic::Ordering::Relaxed);
     status::emit(Status::Connected(peer.name.clone()));
@@ -1187,7 +1189,9 @@ async fn on_message(
                 }
             }
         }
-        Message::WakeAddress(mac) => crate::wake::remember_peer(mac, &state.peer_name),
+        Message::WakeAddresses { macs, wired } => {
+            crate::wake::remember_peer(macs, wired, &state.peer_name);
+        }
         Message::BluetoothAddress(address) => {
             crate::bluetooth::remember_peer(address, &state.peer_name);
         }
