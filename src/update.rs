@@ -219,7 +219,7 @@ pub fn launch(prepared: Prepared) -> Result<()> {
     }
     #[cfg(not(any(windows, target_os = "linux")))]
     {
-        let _ = (exe, prepared);
+        let _ = (exe, prepared.file);
         bail!("pas de mise à jour automatique sur ce système")
     }
 }
