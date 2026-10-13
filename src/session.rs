@@ -79,7 +79,22 @@ pub async fn run(stream: TcpStream, role: Role, local: &mut Local) -> Result<()>
     let peer_ip = stream.peer_addr()?.ip();
     let bluetooth =
         local.audio.bluetooth || crate::network::is_bluetooth_ip(stream.local_addr()?.ip());
-    let (reader, writer) = stream.into_split();
+    run_on(stream, Some(peer_ip), bluetooth, role, local).await
+}
+
+/// Session sur n'importe quel flux : connexion TCP, ou lien Bluetooth direct
+/// (`peer_ip` absent : pas d'UDP, le son passe par le flux).
+pub async fn run_on<S>(
+    stream: S,
+    peer_ip: Option<std::net::IpAddr>,
+    bluetooth: bool,
+    role: Role,
+    local: &mut Local,
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
+{
+    let (reader, writer) = tokio::io::split(stream);
     let (mut reader, mut writer, peer, udp_crypto) = tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
         crypto::handshake(
@@ -134,13 +149,15 @@ pub async fn run(stream: TcpStream, role: Role, local: &mut Local) -> Result<()>
     local.emulation.create(PEER).await;
 
     // Le son passe par UDP (un paquet perdu ne bloque rien), en repli par TCP.
-    let local_ip = if peer_ip.is_ipv6() {
+    let local_ip = if peer_ip.is_some_and(|ip| ip.is_ipv6()) {
         std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
     } else {
         std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
     };
     let socket = UdpSocket::bind((local_ip, 0)).await?;
-    send(&out_tx, Message::UdpPort(socket.local_addr()?.port())).await?;
+    if peer_ip.is_some() {
+        send(&out_tx, Message::UdpPort(socket.local_addr()?.port())).await?;
+    }
     let udp = Udp {
         socket,
         crypto: udp_crypto,
@@ -212,7 +229,7 @@ async fn event_loop(
                 let Some(msg) = msg else { return Ok(()) };
                 match msg {
                     Message::UdpPort(port) => {
-                        udp.peer_addr = Some(std::net::SocketAddr::new(udp.peer_ip, port));
+                        udp.peer_addr = udp.peer_ip.map(|ip| std::net::SocketAddr::new(ip, port));
                     }
                     Message::UdpOk => {
                         if !udp.send_ok {
@@ -225,7 +242,7 @@ async fn event_loop(
             }
             received = udp.socket.recv_from(&mut datagram) => {
                 if let Ok((len, from)) = received
-                    && from.ip() == udp.peer_ip
+                    && Some(from.ip()) == udp.peer_ip
                     && let Some(plain) = udp.crypto.open(&datagram[..len])
                     && let Ok(msg) = postcard::from_bytes::<Message>(&plain)
                 {
@@ -274,7 +291,8 @@ async fn recv_frame(link: &mut AudioLink) -> Option<AudioFrame> {
 struct Udp {
     socket: UdpSocket,
     crypto: UdpCrypto,
-    peer_ip: std::net::IpAddr,
+    /// Absente sur un lien Bluetooth direct : pas d'UDP.
+    peer_ip: Option<std::net::IpAddr>,
     /// Adresse UDP de l'autre PC (son port arrive par la connexion TCP).
     peer_addr: Option<std::net::SocketAddr>,
     /// L'autre PC reçoit nos datagrammes (il l'a confirmé).

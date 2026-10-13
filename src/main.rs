@@ -9,6 +9,7 @@
 
 mod audio;
 mod autostart;
+mod bluetooth;
 mod capture;
 mod clipboard;
 mod codec;
@@ -105,8 +106,9 @@ struct Cli {
     #[arg(long, value_enum, global = true, default_value = "lossless")]
     sound_quality: codec::Quality,
 
-    /// Les deux PC sont reliés par Bluetooth (réseau personnel) : son compressé
-    /// pour tenir dans son débit. Détecté aussi automatiquement.
+    /// Liaison Bluetooth : le PC qui attend publie aussi un service Bluetooth, et
+    /// celui qui se connecte sans adresse trouve seul l'autre PC associé. Le son
+    /// est compressé pour tenir dans le débit du Bluetooth.
     #[arg(long, global = true)]
     bluetooth: bool,
 
@@ -139,7 +141,9 @@ enum Mode {
     /// Se connecte à l'autre PC (reconnexion automatique).
     Connect {
         /// Adresse de l'autre PC, par exemple 192.168.1.20 ou 192.168.1.20:24850.
-        host: String,
+        /// Sans adresse, avec --bluetooth : connexion Bluetooth directe à l'autre PC
+        /// associé.
+        host: Option<String>,
     },
     /// Liste les périphériques audio (pour --sound-device, --mic-output…).
     AudioDevices,
@@ -285,17 +289,72 @@ async fn serve(mode: &Mode, local: &mut Local) -> Result<()> {
                 "en attente de l'autre PC sur {bind} (autre PC à {})",
                 session::side_name(local.peer_side)
             );
+            let mut bt = None;
+            if local.audio.bluetooth {
+                match bluetooth::Server::start().await {
+                    Ok(server) => bt = Some(server),
+                    Err(e) => log::warn!("Bluetooth direct indisponible : {e:#}"),
+                }
+            }
             loop {
                 status::emit(Status::Listening);
-                let (stream, addr) = listener.accept().await?;
-                log::info!("connexion entrante de {addr}");
-                match session::run(stream, Role::Listener, local).await {
-                    Ok(()) => log::info!("{addr} s'est déconnecté"),
-                    Err(e) => log::warn!("connexion avec {addr} terminée : {e:#}"),
+                // Connexion par le réseau ou, en liaison Bluetooth, directement.
+                let incoming = tokio::select! {
+                    accepted = listener.accept() => Incoming::Tcp(accepted?),
+                    accepted = accept_bluetooth(bt.as_mut()) => Incoming::Bluetooth(accepted),
+                };
+                match incoming {
+                    Incoming::Tcp((stream, addr)) => {
+                        log::info!("connexion entrante de {addr}");
+                        match session::run(stream, Role::Listener, local).await {
+                            Ok(()) => log::info!("{addr} s'est déconnecté"),
+                            Err(e) => log::warn!("connexion avec {addr} terminée : {e:#}"),
+                        }
+                    }
+                    Incoming::Bluetooth(Ok((stream, name))) => {
+                        log::info!("connexion Bluetooth entrante de « {name} »");
+                        match session::run_on(stream, None, true, Role::Listener, local).await {
+                            Ok(()) => log::info!("« {name} » s'est déconnecté"),
+                            Err(e) => log::warn!("connexion Bluetooth terminée : {e:#}"),
+                        }
+                    }
+                    Incoming::Bluetooth(Err(e)) => {
+                        log::warn!("Bluetooth direct arrêté : {e:#}");
+                        bt = None;
+                    }
                 }
             }
         }
-        Mode::Connect { host } => {
+        Mode::Connect { host: None } => {
+            if !local.audio.bluetooth {
+                anyhow::bail!("adresse de l'autre PC manquante");
+            }
+            log::info!("recherche de l'autre PC parmi les PC associés en Bluetooth");
+            let mut last_error = String::new();
+            loop {
+                status::emit(Status::Connecting);
+                match bluetooth::connect_paired().await {
+                    Ok((stream, name)) => {
+                        last_error.clear();
+                        log::info!("relié en Bluetooth à « {name} »");
+                        match session::run_on(stream, None, true, Role::Connector, local).await {
+                            Ok(()) => log::info!("« {name} » s'est déconnecté"),
+                            Err(e) => log::warn!("connexion Bluetooth terminée : {e:#}"),
+                        }
+                    }
+                    Err(e) => {
+                        // Le même échec se répète à chaque essai : signalé une fois.
+                        let message = format!("{e:#}");
+                        if message != last_error {
+                            log::warn!("{message}");
+                            last_error = message;
+                        }
+                    }
+                }
+                tokio::time::sleep(RECONNECT_DELAY).await;
+            }
+        }
+        Mode::Connect { host: Some(host) } => {
             let addr = if host.contains(':') && !host.ends_with(']') {
                 host.clone()
             } else {
@@ -313,6 +372,21 @@ async fn serve(mode: &Mode, local: &mut Local) -> Result<()> {
                 tokio::time::sleep(RECONNECT_DELAY).await;
             }
         }
+    }
+}
+
+enum Incoming {
+    Tcp((TcpStream, std::net::SocketAddr)),
+    Bluetooth(Result<(bluetooth::Stream, String)>),
+}
+
+/// Prochaine connexion Bluetooth entrante (jamais sans service Bluetooth).
+async fn accept_bluetooth(
+    server: Option<&mut bluetooth::Server>,
+) -> Result<(bluetooth::Stream, String)> {
+    match server {
+        Some(server) => server.accept().await,
+        None => std::future::pending().await,
     }
 }
 

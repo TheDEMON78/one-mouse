@@ -265,7 +265,10 @@ impl App {
                 crypto::MIN_PASSWORD_LEN
             ));
         }
-        if self.settings.connect && self.settings.address.trim().is_empty() {
+        if self.settings.connect
+            && !self.settings.bluetooth
+            && self.settings.address.trim().is_empty()
+        {
             return Err(
                 "Indiquez l'adresse de l'autre PC (affichée dans sa fenêtre one-mouse).".into(),
             );
@@ -333,7 +336,11 @@ impl App {
             (true, Some(Status::Connecting)) => (
                 ORANGE,
                 "Connexion".into(),
-                format!("Recherche de {}…", self.settings.address.trim()),
+                if self.settings.bluetooth && self.settings.address.trim().is_empty() {
+                    "Recherche de l'autre PC en Bluetooth…".into()
+                } else {
+                    format!("Recherche de {}…", self.settings.address.trim())
+                },
             ),
             (true, Some(Status::Connected(name))) => (
                 GREEN,
@@ -431,9 +438,9 @@ impl App {
                 ui.add_space(4.0);
                 ui.label(
                     egui::RichText::new(
-                        "Pas encore de liaison Bluetooth entre les deux PC (voir les étapes ci-dessous).",
+                        "Bluetooth direct : aucune adresse à saisir, les deux PC se trouvent seuls.",
                     )
-                    .color(ORANGE),
+                    .color(MUTED),
                 );
             }
             if let Some(ip) = address {
@@ -483,7 +490,10 @@ impl App {
                 if s.connect {
                     ui.add_space(4.0);
                     let (label, hint) = if s.bluetooth {
-                        ("Adresse Bluetooth de l'autre PC", "169.254.12.34")
+                        (
+                            "Adresse de l'autre PC (facultatif en Bluetooth)",
+                            "vide : recherche automatique en Bluetooth",
+                        )
                     } else {
                         ("Adresse de l'autre PC", "192.168.1.20")
                     };
@@ -1036,22 +1046,31 @@ fn bluetooth_steps(ui: &mut egui::Ui) {
             ui.label(egui::RichText::new(text).color(TEXT));
         });
     };
+    if cfg!(target_os = "macos") {
+        ui.label(
+            egui::RichText::new(
+                "Bluetooth direct pas encore disponible sous macOS : utilisez le réseau, ou un \
+                 réseau personnel Bluetooth en saisissant l'adresse de l'autre PC.",
+            )
+            .color(ORANGE),
+        );
+        return;
+    }
     step(
         ui,
         "1.",
-        "Associez les deux PC : Paramètres → Bluetooth → Ajouter un appareil (une seule fois).",
+        "Une seule fois : démarrez le partage sur le PC qui attend (il devient visible), puis \
+         sur l'autre PC cliquez sur « Associer en Bluetooth », choisissez le premier PC et \
+         confirmez le code affiché sur les deux.",
     );
+    if ui.button("Associer en Bluetooth").clicked() {
+        crate::bluetooth::open_settings();
+    }
     step(
         ui,
         "2.",
-        "Sur un des PC, Windows : icône Bluetooth près de l'horloge → « Rejoindre un réseau \
-         personnel » → l'autre PC → Se connecter en → Connexion directe. Linux : Paramètres \
-         Bluetooth → l'autre PC → Réseau (PAN).",
-    );
-    step(
-        ui,
-        "3.",
-        "L'« Adresse Bluetooth de ce PC » s'affiche en haut : saisissez-la sur l'autre PC.",
+        "Ensuite, démarrez simplement le partage sur les deux PC : ils se retrouvent tout seuls \
+         en Bluetooth, sans adresse à saisir.",
     );
     ui.label(
         egui::RichText::new(

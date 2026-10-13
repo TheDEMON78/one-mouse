@@ -201,7 +201,10 @@ impl Settings {
         }
         if self.connect {
             args.push("connect".to_owned());
-            args.push(self.address.trim().to_owned());
+            // Sans adresse en liaison Bluetooth : l'autre PC est trouvé tout seul.
+            if !self.address.trim().is_empty() {
+                args.push(self.address.trim().to_owned());
+            }
         } else {
             args.push("listen".to_owned());
         }

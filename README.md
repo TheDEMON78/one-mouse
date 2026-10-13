@@ -72,17 +72,21 @@ notification ; fermer la fenêtre l'y garde (clic sur l'icône pour la rouvrir, 
 
 ## Liaison par Bluetooth
 
-Sans réseau commun, les deux PC peuvent se relier directement en Bluetooth (« réseau personnel », PAN). Choisissez
-**Bluetooth** dans « Liaison entre les deux PC » (onglet Connexion), puis :
+Sans réseau commun, les deux PC peuvent se relier **directement en Bluetooth**, sans adresse à saisir (Windows et
+Linux). Choisissez **Bluetooth** dans « Liaison entre les deux PC » (onglet Connexion) sur les deux PC.
 
-1. Associez les deux PC : *Paramètres → Bluetooth → Ajouter un appareil* (une seule fois).
-2. Sur un des PC — Windows : icône Bluetooth près de l'horloge → *Rejoindre un réseau personnel* → l'autre PC →
-   *Se connecter en → Connexion directe*. Linux : *Paramètres Bluetooth → l'autre PC → Réseau (PAN)*.
-3. L'« Adresse Bluetooth de ce PC » s'affiche en haut de l'onglet Connexion : saisissez-la sur l'autre PC.
+1. **Une seule fois** : démarrez le partage sur le PC qui attend (il devient visible en Bluetooth), puis sur l'autre
+   PC cliquez sur **Associer en Bluetooth**, choisissez le premier PC et confirmez le code affiché sur les deux.
+   Cette confirmation est imposée par le système, pour la sécurité : aucune application ne peut la faire à votre place.
+2. **Ensuite** : démarrez simplement le partage sur les deux PC. Celui qui se connecte cherche tout seul, parmi les PC
+   associés, celui qui attend avec one-mouse, et se reconnecte automatiquement.
 
 Le débit du Bluetooth (1 à 2 Mbit/s) ne permet pas le son sans perte : il est compressé automatiquement (Opus
-256 kbit/s, micro 64 kbit/s), avec un peu plus de latence et une portée d'une dizaine de mètres. Une liaison
-Bluetooth est aussi détectée automatiquement (option `--bluetooth` en ligne de commande).
+256 kbit/s, micro 64 kbit/s), avec un peu plus de latence et une portée d'une dizaine de mètres. Le réseau local reste
+le meilleur choix pour un son parfait.
+
+Sous macOS, le Bluetooth direct n'est pas encore disponible : un réseau personnel Bluetooth (PAN) fonctionne en
+saisissant l'adresse de l'autre PC. En ligne de commande : `--bluetooth`, et `connect` sans adresse.
 
 ## Son et micro
 
@@ -179,6 +183,7 @@ Organisation du code (`src/`) :
 | `gui.rs`, `tray.rs` | Fenêtre de réglages, icône de la zone de notification |
 | `session.rs` | Connexion, passage du curseur, son, micro, presse-papier |
 | `crypto.rs`, `protocol.rs` | Poignée de main chiffrée et messages échangés |
+| `bluetooth/`, `network.rs` | Liaison Bluetooth directe (Winsock RFCOMM, BlueZ), interfaces réseau |
 | `capture/` | Capture de la souris et du clavier (X11 maison, sinon lan-mouse) |
 | `audio.rs`, `codec.rs` | Capture, lecture, mixage, rééchantillonnage, sans perte / Opus |
 | `default_mic/`, `firewall.rs`, `autostart.rs` | Intégration au système |

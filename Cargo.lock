@@ -2623,6 +2623,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "winresource",
  "x11",
+ "zbus",
 ]
 
 [[package]]
