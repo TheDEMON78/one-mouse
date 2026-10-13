@@ -1,8 +1,9 @@
 //! Mise en paquets du son pour le réseau, en deux qualités :
 //!
 //! - **Sans perte** (par défaut) : flottants 32 bits, tels que capturés, en
-//!   paquets de 2,5 ms (un datagramme UDP chacun, sans fragmentation). Un paquet
-//!   perdu est comblé par le précédent.
+//!   paquets de 2,5 ms (un datagramme UDP chacun, sans fragmentation). Chaque
+//!   paquet transporte aussi le précédent ; si les deux sont perdus, le trou est
+//!   comblé en prolongeant le son reçu juste avant, période après période.
 //! - **Compressé** : Opus (le codec de Discord, Zoom, WebRTC) à 510 kbit/s en
 //!   stéréo pour le son, 128 kbit/s pour le micro, trames de 10 ms à 48 kHz ;
 //!   six fois moins de données, pour un Wi-Fi faible. Pertes reconstituées par
@@ -233,8 +234,9 @@ pub struct AudioDecoder {
 
 enum DecoderKind {
     Pcm {
-        /// Dernier paquet reçu, rejoué pour combler une perte.
-        last: Option<AudioFrame>,
+        /// Son reçu juste avant (entrelacé), pour combler les pertes.
+        history: Vec<f32>,
+        history_rate: u32,
     },
     Opus {
         decoder: Box<Decoder>,
@@ -245,7 +247,10 @@ enum DecoderKind {
 impl AudioDecoder {
     pub fn new(format: AudioFormat, channels: u8) -> Result<Self> {
         let inner = match format {
-            AudioFormat::Pcm => DecoderKind::Pcm { last: None },
+            AudioFormat::Pcm => DecoderKind::Pcm {
+                history: Vec::new(),
+                history_rate: 0,
+            },
             AudioFormat::Opus => DecoderKind::Opus {
                 decoder: Box::new(Decoder::new(
                     OPUS_RATE,
@@ -301,7 +306,10 @@ impl AudioDecoder {
         let conceal = (1..=MAX_CONCEALED).contains(&missing);
         let channels = self.channels;
         match &mut self.inner {
-            DecoderKind::Pcm { last } => {
+            DecoderKind::Pcm {
+                history,
+                history_rate,
+            } => {
                 ensure!(
                     (8_000..=192_000).contains(&rate) && (1..=8).contains(&channels),
                     "paquet audio invalide"
@@ -313,21 +321,25 @@ impl AudioDecoder {
                 } else {
                     None
                 };
+                // Son réel qui suit le trou : copie restituée puis paquet courant.
+                let mut next = recovered.unwrap_or_default();
+                next.extend_from_slice(&current);
                 let mut samples = Vec::with_capacity(current.len() * (missing as usize + 1));
-                if conceal && let Some(last) = last.as_ref().filter(|p| p.rate == rate) {
-                    for _ in 0..missing - u32::from(recovered.is_some()) {
-                        samples.extend_from_slice(&last.samples);
-                    }
+                if *history_rate != rate {
+                    history.clear();
+                    *history_rate = rate;
                 }
-                if let Some(recovered) = recovered {
-                    samples.extend(recovered);
+                if conceal {
+                    let lost = (missing - u32::from(next.len() > current.len())) as usize;
+                    let frames = lost * (current.len() / channels);
+                    samples.extend(conceal_pcm(history, channels, rate, frames, &mut next));
                 }
-                samples.extend_from_slice(&current);
-                *last = Some(AudioFrame {
-                    rate,
-                    channels: channels as u16,
-                    samples: current,
-                });
+                samples.extend(next);
+                history.extend_from_slice(&samples);
+                let keep = (rate * CONCEAL_HISTORY_MS / 1000) as usize * channels;
+                if history.len() > keep {
+                    history.drain(..history.len() - keep);
+                }
                 Ok(Some(AudioFrame {
                     rate,
                     channels: channels as u16,
@@ -369,6 +381,86 @@ impl AudioDecoder {
             }
         }
     }
+}
+
+/// Trames de fondu entre le son de remplacement et le son réel qui revient.
+const CONCEAL_FADE: usize = 32;
+/// Son récent gardé pour combler les pertes (ms).
+const CONCEAL_HISTORY_MS: u32 = 20;
+
+/// Comble `frames` trames perdues à la suite de `history` (son reçu juste
+/// avant, entrelacé) : la période du son est cherchée dans `history`, puis le
+/// son est prolongé période après période, sans saut ; `next` (le son réel qui
+/// revient) est rejoint par un fondu. Méthode des téléphones numériques
+/// (G.711 annexe I). Une simple répétition du dernier paquet faisait deux
+/// sauts, audibles comme un grésillement.
+fn conceal_pcm(
+    history: &[f32],
+    channels: usize,
+    rate: u32,
+    frames: usize,
+    next: &mut [f32],
+) -> Vec<f32> {
+    let channels = channels.max(1);
+    let len = history.len() / channels;
+    if len < 4 || frames == 0 {
+        return Vec::new();
+    }
+    let period = find_period(history, channels, rate);
+    let start = len - period;
+    let frame_at = |n: usize| start + n % period;
+    let mut out = Vec::with_capacity(frames * channels);
+    for n in 0..frames {
+        let f = frame_at(n);
+        out.extend_from_slice(&history[f * channels..(f + 1) * channels]);
+    }
+    let fade = CONCEAL_FADE.min(next.len() / channels);
+    for k in 0..fade {
+        let f = frame_at(frames + k);
+        let w = (k + 1) as f32 / (fade + 1) as f32;
+        for c in 0..channels {
+            let ghost = history[f * channels + c];
+            let real = &mut next[k * channels + c];
+            *real = ghost + (*real - ghost) * w;
+        }
+    }
+    out
+}
+
+/// Période (en trames) qui ressemble le plus à la fin de `history` : maximum
+/// de corrélation normalisée entre la fin du son et le son décalé. Entre
+/// 0,5 ms et 15 ms ; à défaut, tout l'historique.
+fn find_period(history: &[f32], channels: usize, rate: u32) -> usize {
+    let len = history.len() / channels;
+    let mono: Vec<f32> = history
+        .chunks_exact(channels)
+        .map(|f| f.iter().sum::<f32>() / channels as f32)
+        .collect();
+    let window = (rate as usize / 400).clamp(8, len / 3);
+    let min = (rate as usize / 2000).max(2);
+    let max = (rate as usize * 15 / 1000).min(len - window);
+    if min >= max {
+        return len;
+    }
+    let target = &mono[len - window..];
+    let mut best = (f32::MIN, len);
+    for period in min..=max {
+        let candidate = &mono[len - window - period..len - period];
+        let (mut dot, mut energy) = (0.0f32, 0.0f32);
+        for (a, b) in target.iter().zip(candidate) {
+            dot += a * b;
+            energy += b * b;
+        }
+        let score = if energy > 1e-12 {
+            dot / energy.sqrt()
+        } else {
+            0.0
+        };
+        if score > best.0 {
+            best = (score, period);
+        }
+    }
+    best.1
 }
 
 /// Échantillons d'un paquet sans perte (flottants 32 bits little-endian).
@@ -574,5 +666,36 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    /// Deux paquets perdus d'affilée (le second restitué par sa copie, le premier
+    /// comblé) : le son reste continu, sans saut audible.
+    #[test]
+    fn lost_packets_are_concealed_smoothly() {
+        let mut enc = AudioEncoder::new(AudioKind::Sound, Quality::Lossless).unwrap();
+        let mut packets = Vec::new();
+        for k in 0..40 {
+            packets.extend(enc.push(&sine(1000.0, k * 240, 240, 48_000, 1)).unwrap());
+        }
+        let mut dec = AudioDecoder::new(AudioFormat::Pcm, 1).unwrap();
+        let mut out = Vec::new();
+        let mut previous: Vec<u8> = Vec::new();
+        for p in &packets {
+            let prev = std::mem::replace(&mut previous, p.data.clone());
+            if p.seq == 30 || p.seq == 31 {
+                continue;
+            }
+            if let Some(f) = dec.decode_with(p.seq, p.rate, &p.data, &prev).unwrap() {
+                out.extend(f.samples);
+            }
+        }
+        // Rien ne manque, et pas de saut : différence seconde d'un sinus de 1 kHz
+        // d'amplitude 0,5 de 0,0086 au plus (une répétition brute donnait 0,13).
+        assert_eq!(out.len(), packets.len() * packets[0].data.len() / 4);
+        let worst = out
+            .windows(3)
+            .map(|w| (w[0] - 2.0 * w[1] + w[2]).abs())
+            .fold(0.0, f32::max);
+        assert!(worst < 0.012, "saut de {worst}");
     }
 }
