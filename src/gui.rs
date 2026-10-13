@@ -24,6 +24,8 @@ use crate::status::{
 use crate::tray::Tray;
 use crate::{autostart, crypto, firewall, network};
 
+mod wizard;
+
 const ICON_PNG: &[u8] = include_bytes!("../assets/icons/256x256.png");
 const MAX_LOG_LINES: usize = 300;
 /// Transferts de fichiers affichés.
@@ -311,6 +313,10 @@ struct App {
     error: Option<String>,
     /// Message de réussite d'une action (effacé par la suivante).
     notice: Option<String>,
+    /// Assistant de premier démarrage en cours (étape affichée).
+    wizard: Option<wizard::Step>,
+    /// Réponse à « souris branchée sur cet ordinateur ? » (aucune au départ).
+    wizard_main: Option<bool>,
     /// Des fichiers survolent la zone de dépôt.
     drop_zone_hovered: bool,
     logo: egui::TextureHandle,
@@ -338,6 +344,7 @@ impl App {
         apply_theme(&cc.egui_ctx);
         let settings = Settings::load();
         let settings_auto_update = settings.auto_update;
+        let wizard = (!settings.setup_done).then_some(wizard::Step::Welcome);
         let logo = {
             let image = image::load_from_memory(ICON_PNG)
                 .expect("icône intégrée valide")
@@ -363,6 +370,8 @@ impl App {
             bluetooth_checked: Instant::now(),
             error: None,
             notice: None,
+            wizard,
+            wizard_main: None,
             drop_zone_hovered: false,
             logo,
             tab: Tab::Connection,
@@ -1523,6 +1532,16 @@ impl App {
         self.update_card(ui);
         card(ui, |ui| {
             section_title(ui, "Démarrage");
+            if ui
+                .add_enabled(
+                    !running,
+                    egui::Button::new("Relancer l'assistant de démarrage"),
+                )
+                .on_hover_text("Les 3 questions du premier démarrage, pour tout régler à nouveau.")
+                .clicked()
+            {
+                self.open_wizard();
+            }
             let mut autostart = self.autostart;
             if ui
                 .checkbox(&mut autostart, "Lancer one-mouse à l'ouverture de session")
@@ -2321,6 +2340,40 @@ impl eframe::App for App {
         if running {
             // L'état change sans action de l'utilisateur : rafraîchissement régulier.
             ctx.request_repaint_after(Duration::from_millis(500));
+        }
+
+        if let Some(step) = self.wizard
+            && !running
+        {
+            egui::Panel::top("entete")
+                .frame(
+                    egui::Frame::new()
+                        .fill(SURFACE)
+                        .inner_margin(egui::Margin::symmetric(16, 12)),
+                )
+                .show(ui, |ui| self.header(ui, running));
+            egui::Panel::bottom("actions")
+                .frame(
+                    egui::Frame::new()
+                        .fill(SURFACE)
+                        .inner_margin(egui::Margin::symmetric(16, 12)),
+                )
+                .show(ui, |ui| {
+                    if let Some(error) = &self.error {
+                        ui.label(egui::RichText::new(error).color(RED));
+                    }
+                    self.wizard_buttons(ui, &ctx, step);
+                });
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::new()
+                        .fill(BACKGROUND)
+                        .inner_margin(egui::Margin::symmetric(16, 12)),
+                )
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| self.wizard_ui(ui, step));
+                });
+            return;
         }
 
         egui::Panel::top("entete")

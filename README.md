@@ -76,14 +76,15 @@ one-mouse vérifie les nouvelles versions au démarrage puis toutes les 6 heures
 
 ## Démarrage rapide
 
-Ouvrez **one-mouse** sur les deux PC (même réseau local) :
+Installez **one-mouse** sur les deux PC (même box ou même Wi-Fi). Au premier lancement, un **assistant** pose trois
+questions sur chaque PC :
 
-1. Sur le premier PC, laissez « Attendre l'autre PC ».
-2. Sur le second PC, choisissez « Se connecter ». **Aucune adresse à saisir** : il trouve tout seul, sur le réseau
-   local, le PC qui attend avec le même mot de passe (l'adresse reste possible, par exemple à travers un VPN).
-3. Sur les deux PC : saisissez le **même mot de passe** (8 caractères minimum), indiquez dans l'onglet Écrans de quel
-   côté se trouve l'autre PC, puis cliquez sur **Démarrer le partage**.
-4. Sur le PC où sont branchés la souris, le clavier et le casque, cochez « Ma souris, mon clavier et mon casque sont branchés sur ce PC » (onglet Son et micro).
+1. **Votre souris et votre clavier sont-ils branchés sur cet ordinateur ?** « Oui » sur l'un, « Non » sur l'autre.
+2. **Où se trouve l'écran de l'autre ordinateur ?** Cliquez sur son emplacement.
+3. **Mot de passe** : le même sur les deux PC (8 caractères minimum).
+
+Cliquez ensuite sur **Démarrer le partage** sur les deux PC : ils se trouvent tout seuls, sans adresse à saisir.
+L'assistant peut être relancé depuis l'onglet Réglages ; tout reste modifiable dans les onglets.
 
 Poussez ensuite le curseur contre le bord de l'écran situé du côté de l'autre PC pour passer dessus, et contre le bord
 opposé pour revenir.

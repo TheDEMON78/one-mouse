@@ -104,13 +104,15 @@ pub struct Settings {
     pub wake: bool,
     /// Historique du presse-papier (effacé à la fermeture).
     pub clipboard_history: bool,
+    /// L'assistant de premier démarrage a été suivi (ou passé).
+    pub setup_done: bool,
     /// Version du format, pour adapter les anciens réglages (absent = ancien format 0).
     #[serde(default)]
     pub format: u32,
 }
 
 /// Format actuel des réglages.
-const FORMAT: u32 = 3;
+const FORMAT: u32 = 4;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -141,6 +143,7 @@ impl Default for Settings {
             keep_awake: true,
             wake: true,
             clipboard_history: true,
+            setup_done: false,
             format: FORMAT,
         }
     }
@@ -163,6 +166,10 @@ impl Settings {
 
     /// Adapte les réglages enregistrés par une version précédente.
     fn migrate(&mut self) {
+        if self.format < 4 && !self.password.is_empty() {
+            // Déjà réglé avant l'assistant de premier démarrage : pas d'assistant.
+            self.setup_done = true;
+        }
         if self.format < 2 && self.sound == audio::Mode::Auto {
             // Avant le « PC principal », « auto » était le défaut : le son est maintenant
             // envoyé en permanence vers le PC principal.
@@ -263,6 +270,18 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setup_assistant_only_for_new_installs() {
+        assert!(!Settings::default().setup_done);
+        let mut old: Settings =
+            serde_json::from_str(r#"{"password":"motdepasse","format":3}"#).unwrap();
+        old.migrate();
+        assert!(old.setup_done);
+        let mut empty: Settings = serde_json::from_str(r#"{"format":3}"#).unwrap();
+        empty.migrate();
+        assert!(!empty.setup_done);
+    }
 
     #[test]
     fn engine_args_listen() {
