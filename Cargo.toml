@@ -53,7 +53,7 @@ rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "time", "sync", "signal"] }
+tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "time", "sync", "signal", "fs"] }
 ureq = { version = "3", features = ["json", "platform-verifier"] }
 
 # Les backends Wayland / X11 ne sont activés que pour Linux : le build.rs de ces
