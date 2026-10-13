@@ -29,6 +29,9 @@ Ce n'est **pas** du bureau à distance : aucune image n'est transmise, chaque PC
 
 - 🖱️ **Souris et clavier partagés** : le curseur franchit le bord de l'écran, dans les deux sens, entre Windows, Linux
   et macOS (n'importe quelle combinaison). **Un seul curseur visible** : celui du PC utilisé (Windows, Linux X11).
+- 🖥️ **Disposition des écrans** : l'onglet Écrans montre les écrans des deux PC (plusieurs écrans par PC) ; faites
+  glisser ceux de l'autre PC pour les aligner. Le curseur passe d'un PC à l'autre **à la même hauteur** (Windows,
+  Linux X11).
 - 📋 **Presse-papier partagé** : texte, images et fichiers. Copiez sur un PC, collez sur l'autre avec Ctrl+V (les
   fichiers copiés sont transférés, 1 Go au plus par copie). **Historique** des 20 dernières copies des deux PC
   (onglet Presse-papier), effacé à la fermeture.

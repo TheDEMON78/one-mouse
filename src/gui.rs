@@ -16,8 +16,11 @@ use eframe::egui;
 
 use crate::audio::{self, Mode};
 use crate::codec::Quality;
+use crate::screens::Monitor;
 use crate::settings::{Settings, Side};
-use crate::status::{BtStatus, FileDirection, FileStatus, LinkStatus, MicStatus, Status};
+use crate::status::{
+    BtStatus, FileDirection, FileStatus, LinkStatus, MicStatus, ScreensStatus, Status,
+};
 use crate::tray::Tray;
 use crate::{autostart, crypto, firewall, network};
 
@@ -61,6 +64,8 @@ struct Shared {
     bt: Option<BtStatus>,
     /// Derniers fichiers envoyés ou reçus (le plus récent en dernier).
     files: VecDeque<FileStatus>,
+    /// Écrans des deux PC annoncés par le moteur, pas encore enregistrés.
+    screens: Option<ScreensStatus>,
     log: VecDeque<String>,
 }
 
@@ -123,6 +128,8 @@ impl Engine {
                         shared.mic = Some(mic);
                     } else if let Some(link) = LinkStatus::parse(&line) {
                         shared.link = Some(link);
+                    } else if let Some(screens) = ScreensStatus::parse(&line) {
+                        shared.screens = Some(screens);
                     } else if let Some(bt) = BtStatus::parse(&line) {
                         shared.bt = Some(bt);
                     } else if let Some(file) = FileStatus::parse(&line) {
@@ -841,6 +848,80 @@ impl App {
                 });
             });
             card(ui, |ui| {
+                section_title(ui, "Alignement des écrans");
+                ui.label(
+                    egui::RichText::new(if matches!(s.side, Side::Left | Side::Right) {
+                        "Faites glisser les écrans de l'autre PC vers le haut ou le bas : le \
+                         curseur passe d'un PC à l'autre à la même hauteur, comme dans les \
+                         paramètres d'affichage."
+                    } else {
+                        "Faites glisser les écrans de l'autre PC vers la gauche ou la droite : \
+                         le curseur passe d'un PC à l'autre au même endroit, comme dans les \
+                         paramètres d'affichage."
+                    })
+                    .color(MUTED),
+                );
+                ui.add_space(6.0);
+                let mut local = crate::screens::local_monitors();
+                if local.is_empty() {
+                    local = s.local_monitors.clone();
+                }
+                layout_canvas(
+                    ui,
+                    &local,
+                    &s.peer_monitors,
+                    &s.peer_name,
+                    s.side,
+                    &mut s.peer_offset,
+                );
+                ui.horizontal(|ui| {
+                    let along = |m: &[Monitor]| {
+                        crate::screens::bounds(m).map(|b| {
+                            if matches!(s.side, Side::Left | Side::Right) {
+                                b.height
+                            } else {
+                                b.width
+                            }
+                        })
+                    };
+                    let (start, end) = if matches!(s.side, Side::Left | Side::Right) {
+                        ("Aligner en haut", "Aligner en bas")
+                    } else {
+                        ("Aligner à gauche", "Aligner à droite")
+                    };
+                    if ui.small_button(start).clicked() {
+                        s.peer_offset = 0;
+                    }
+                    if let (Some(this), Some(other)) = (along(&local), along(&s.peer_monitors)) {
+                        if ui.small_button("Centrer").clicked() {
+                            s.peer_offset = (this - other) / 2;
+                        }
+                        if ui.small_button(end).clicked() {
+                            s.peer_offset = this - other;
+                        }
+                    }
+                });
+                if s.peer_monitors.is_empty() {
+                    ui.label(
+                        egui::RichText::new(
+                            "Connectez-vous une fois : les écrans de l'autre PC s'afficheront ici.",
+                        )
+                        .small()
+                        .color(MUTED),
+                    );
+                }
+                if local.is_empty() {
+                    ui.label(
+                        egui::RichText::new(
+                            "Les écrans de ce PC ne peuvent pas être lus ici (Wayland, macOS) : \
+                             le curseur garde sa position en changeant de PC.",
+                        )
+                        .small()
+                        .color(MUTED),
+                    );
+                }
+            });
+            card(ui, |ui| {
                 section_title(ui, "Vitesse de la souris sur l'autre PC");
                 ui.horizontal(|ui| {
                     ui.spacing_mut().slider_width = (ui.available_width() - 190.0).max(120.0);
@@ -1006,6 +1087,30 @@ impl App {
 
     /// Installe une mise à jour prête : seule (option) quand la souris ne contrôle
     /// aucun PC, ou à la demande. one-mouse se ferme, l'installateur le relance.
+    /// Enregistre les écrans de l'autre PC et l'alignement retenu par le moteur
+    /// (après harmonisation avec l'autre PC).
+    fn handle_screens(&mut self) {
+        let Some(screens) = self.shared.lock().expect("verrou").screens.take() else {
+            return;
+        };
+        for settings in [&mut self.settings, &mut self.saved] {
+            if !screens.peer.is_empty() {
+                settings.peer_monitors = screens.peer.clone();
+                settings.peer_name = screens.peer_name.clone();
+            }
+            if !screens.local.is_empty() {
+                settings.local_monitors = screens.local.clone();
+            }
+            if let Some(side) = Side::from_code(screens.side) {
+                settings.side = side;
+            }
+            settings.peer_offset = screens.offset;
+        }
+        if let Err(e) = self.saved.save() {
+            self.error = Some(format!("Enregistrement des réglages impossible : {e:#}"));
+        }
+    }
+
     fn handle_update(&mut self, ctx: &egui::Context) {
         if !matches!(self.updater.state(), crate::update::UpdateState::Ready(_)) {
             return;
@@ -1649,6 +1754,170 @@ fn choice_tile(ui: &mut egui::Ui, value: &mut bool, option: bool, title: &str, d
     }
 }
 
+/// Écrans des deux PC à l'échelle, ceux de l'autre PC déplaçables le long du
+/// bord partagé (`offset`, en pixels).
+fn layout_canvas(
+    ui: &mut egui::Ui,
+    local: &[Monitor],
+    peer: &[Monitor],
+    peer_name: &str,
+    side: Side,
+    offset: &mut i32,
+) {
+    // Écrans inconnus : un écran 1920 × 1080 pour la représentation.
+    let placeholder = [Monitor {
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+    }];
+    let local = if local.is_empty() {
+        &placeholder[..]
+    } else {
+        local
+    };
+    let peer_known = !peer.is_empty();
+    let peer = if peer_known { peer } else { &placeholder[..] };
+    let (Some(lb), Some(pb)) = (crate::screens::bounds(local), crate::screens::bounds(peer)) else {
+        return;
+    };
+    let vertical = matches!(side, Side::Left | Side::Right);
+    let (local_len, peer_len) = if vertical {
+        (lb.height, pb.height)
+    } else {
+        (lb.width, pb.width)
+    };
+    // Les deux bureaux restent en contact.
+    let min_offset = -peer_len + 1;
+    let max_offset = local_len - 1;
+    *offset = (*offset).clamp(min_offset, max_offset);
+
+    // Origine du bureau de l'autre PC dans celui de ce PC.
+    let peer_origin = |offset: i32| match side {
+        Side::Right => (lb.x + lb.width, lb.y + offset),
+        Side::Left => (lb.x - pb.width, lb.y + offset),
+        Side::Bottom => (lb.x + offset, lb.y + lb.height),
+        Side::Top => (lb.x + offset, lb.y - pb.height),
+    };
+    // Échelle fixe (indépendante du décalage) : le dessin ne bouge pas pendant
+    // le glissement. Étendue maximale : toutes les positions possibles.
+    let (span_w, span_h) = if vertical {
+        (
+            (lb.width + pb.width) as f32,
+            (local_len + 2 * peer_len) as f32,
+        )
+    } else {
+        (
+            (local_len + 2 * peer_len) as f32,
+            (lb.height + pb.height) as f32,
+        )
+    };
+    let height = 200.0;
+    let (response, painter) = ui.allocate_painter(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::drag(),
+    );
+    let area = response.rect.shrink(8.0);
+    let scale = (area.width() / span_w).min(area.height() / span_h);
+    // Centre du dessin : centre du bureau de ce PC, décalé vers l'autre PC.
+    let (half_w, half_h) = match side {
+        Side::Right => (pb.width as f32 / 2.0, 0.0),
+        Side::Left => (-pb.width as f32 / 2.0, 0.0),
+        Side::Bottom => (0.0, pb.height as f32 / 2.0),
+        Side::Top => (0.0, -pb.height as f32 / 2.0),
+    };
+    let center_x = lb.x as f32 + lb.width as f32 / 2.0 + half_w;
+    let center_y = lb.y as f32 + lb.height as f32 / 2.0 + half_h;
+    let to_screen = |x: i32, y: i32| {
+        area.center() + egui::vec2((x as f32 - center_x) * scale, (y as f32 - center_y) * scale)
+    };
+    let rect_of = |m: &Monitor, dx: i32, dy: i32| {
+        egui::Rect::from_two_pos(
+            to_screen(m.x + dx, m.y + dy),
+            to_screen(m.x + m.width + dx, m.y + m.height + dy),
+        )
+        .shrink(1.0)
+    };
+
+    // Glissement : converti en pixels du bureau, avec aimantation aux
+    // alignements usuels (haut, centre, bas).
+    let drag_id = ui.id().with("decalage");
+    if response.drag_started() {
+        ui.data_mut(|d| d.insert_temp(drag_id, *offset as f32));
+    }
+    if response.dragged() {
+        let delta = response.drag_delta();
+        let moved = if vertical { delta.y } else { delta.x } / scale;
+        let raw = ui.data_mut(|d| {
+            let value = d.get_temp_mut_or(drag_id, *offset as f32);
+            *value += moved;
+            *value
+        });
+        let snap = (12.0 / scale) as i32;
+        let mut value = raw.round() as i32;
+        for target in [0, (local_len - peer_len) / 2, local_len - peer_len] {
+            if (value - target).abs() <= snap {
+                value = target;
+            }
+        }
+        *offset = value.clamp(min_offset, max_offset);
+    }
+    if response.hovered() || response.dragged() {
+        ui.ctx().set_cursor_icon(if vertical {
+            egui::CursorIcon::ResizeVertical
+        } else {
+            egui::CursorIcon::ResizeHorizontal
+        });
+    }
+
+    for m in local {
+        let rect = rect_of(m, 0, 0);
+        painter.rect_filled(rect, 4, SURFACE_LIGHT);
+        painter.rect_stroke(
+            rect,
+            4,
+            egui::Stroke::new(1.5, TEXT),
+            egui::StrokeKind::Inside,
+        );
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            format!("Ce PC\n{} × {}", m.width, m.height),
+            egui::FontId::proportional(11.0),
+            TEXT,
+        );
+    }
+    let (ox, oy) = peer_origin(*offset);
+    let (dx, dy) = (ox - pb.x, oy - pb.y);
+    let name = if peer_name.is_empty() {
+        "Autre PC"
+    } else {
+        peer_name
+    };
+    for m in peer {
+        let rect = rect_of(m, dx, dy);
+        let stroke = if peer_known {
+            egui::Stroke::new(2.0, ACCENT)
+        } else {
+            egui::Stroke::new(1.5, GREY)
+        };
+        painter.rect_filled(rect, 4, ACCENT.gamma_multiply(0.25));
+        painter.rect_stroke(rect, 4, stroke, egui::StrokeKind::Inside);
+        let label = if peer_known {
+            format!("{name}\n{} × {}", m.width, m.height)
+        } else {
+            format!("{name}\n(écrans inconnus)")
+        };
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            label,
+            egui::FontId::proportional(11.0),
+            egui::Color32::WHITE,
+        );
+    }
+}
+
 /// Disposition des écrans : ce PC au centre, l'autre PC à cliquer autour.
 fn side_picker(ui: &mut egui::Ui, side: &mut Side) {
     let size = egui::vec2(ui.available_width(), 190.0);
@@ -1809,6 +2078,7 @@ impl eframe::App for App {
         self.handle_tray(&ctx);
         self.handle_update(&ctx);
         self.handle_dropped_files(&ctx);
+        self.handle_screens();
         let running = self.running();
         if running {
             // L'état change sans action de l'utilisateur : rafraîchissement régulier.

@@ -25,6 +25,7 @@ mod network;
 mod power;
 mod powershell;
 mod protocol;
+mod screens;
 mod session;
 mod settings;
 mod status;
@@ -72,6 +73,16 @@ struct Cli {
     /// Position de l'autre PC par rapport à celui-ci.
     #[arg(long, value_enum, global = true, default_value = "right")]
     side: Side,
+
+    /// Décalage du bureau de l'autre PC le long du bord partagé, en pixels
+    /// (positif : vers le bas, ou vers la droite s'il est au-dessus ou en dessous).
+    #[arg(
+        long,
+        global = true,
+        default_value_t = 0,
+        allow_negative_numbers = true
+    )]
+    peer_offset: i32,
 
     /// Mot de passe partagé (identique sur les deux PC, 8 caractères minimum).
     #[arg(
@@ -186,6 +197,7 @@ fn main() -> Result<()> {
     }
     // Curseurs laissés cachés par un arrêt brutal précédent : rétablis.
     cursor::restore_at_startup();
+    screens::enable_dpi_awareness();
     let result = block_on(run(cli, mode)).and_then(|r| r);
     if let Err(e) = &result {
         status::emit(Status::Error(format!("{e:#}")));
@@ -278,6 +290,7 @@ async fn run(cli: Cli, mode: Mode) -> Result<()> {
         psk,
         name,
         peer_side: cli.side.into(),
+        peer_offset: cli.peer_offset,
         pointer_speed: cli.pointer_speed,
         audio: AudioConfig {
             main: cli.main,

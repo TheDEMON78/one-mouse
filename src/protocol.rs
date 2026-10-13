@@ -4,7 +4,7 @@ use input_event::{Event, KeyboardEvent, PointerEvent};
 use serde::{Deserialize, Serialize};
 
 /// Version du protocole, incrémentée à chaque changement incompatible.
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 
 /// Taille maximale d'un texte de presse-papier synchronisé (512 Kio).
 pub const MAX_CLIPBOARD_LEN: usize = 512 * 1024;
@@ -19,13 +19,17 @@ pub enum Message {
         main: bool,
     },
     /// L'émetteur commence à envoyer ses entrées : le récepteur prend la main.
-    Enter,
+    /// `along` : où le curseur a quitté l'écran de l'émetteur, le long du bord
+    /// partagé (depuis le haut ou la gauche de son bureau), pour qu'il arrive à
+    /// la même hauteur.
+    Enter { along: Option<i32> },
     /// Un événement souris ou clavier à rejouer sur le récepteur.
     Input(WireEvent),
     /// L'émetteur arrête d'envoyer ses entrées (retour du curseur chez lui).
     Exit,
-    /// Le récepteur demande à l'émetteur d'arrêter (le curseur a franchi le bord du retour).
-    Leave,
+    /// Le récepteur demande à l'émetteur d'arrêter (le curseur a franchi le bord
+    /// du retour) ; `along` : comme pour `Enter`.
+    Leave { along: Option<i32> },
     /// Nouveau texte copié dans le presse-papier.
     Clipboard(String),
     /// Paquet de son (sans perte ou Opus).
@@ -51,9 +55,12 @@ pub enum Message {
     /// Adresse Bluetooth de l'émetteur : mémorisée pour se relier ensuite en
     /// Bluetooth sans recherche.
     BluetoothAddress(u64),
-    /// Côté où l'émetteur voit l'autre PC (0 gauche, 1 droite, 2 haut, 3 bas) :
+    /// Côté où l'émetteur voit l'autre PC (0 gauche, 1 droite, 2 haut, 3 bas) et
+    /// décalage du bureau de l'autre PC par rapport au sien, le long de ce bord :
     /// deux réglages incohérents sont harmonisés.
-    Side(u8),
+    Layout { side: u8, offset: i32 },
+    /// Écrans de l'émetteur (pour l'alignement et l'onglet Écrans).
+    Screens(Vec<crate::screens::Monitor>),
     /// Début d'un fichier envoyé : chemin relatif (« dossier/fichier.txt »).
     /// `batch` : fait partie d'un lot destiné au presse-papier.
     FileStart {

@@ -34,12 +34,14 @@ const WHEEL_STEP: i32 = 120;
 pub enum Command {
     Create(Position),
     Destroy(Position),
-    Release,
+    /// Rend la main ; le curseur réapparaît au point donné, sinon là où il était sorti.
+    Release(Option<(i32, i32)>),
     Terminate,
 }
 
-/// Événement envoyé au reste du programme.
-pub type Output = (Position, CaptureEvent);
+/// Événement envoyé au reste du programme, avec, pour `Begin`, le point où le
+/// curseur a quitté l'écran.
+pub type Output = (Position, CaptureEvent, Option<(i32, i32)>);
 
 /// Démarre le thread de capture. Échoue si le serveur X ou XInput2 sont indisponibles.
 pub fn spawn() -> Result<(std_mpsc::Sender<Command>, mpsc::UnboundedReceiver<Output>)> {
@@ -219,12 +221,12 @@ impl X11 {
                     Ok(Command::Destroy(pos)) => {
                         self.positions.remove(&pos);
                         if self.grabbed.is_some_and(|(p, _, _)| p == pos) {
-                            self.release();
+                            self.release(None);
                         }
                     }
-                    Ok(Command::Release) => self.release(),
+                    Ok(Command::Release(point)) => self.release(point),
                     Ok(Command::Terminate) | Err(std_mpsc::TryRecvError::Disconnected) => {
-                        self.release();
+                        self.release(None);
                         // SAFETY : plus aucun appel Xlib après la fermeture.
                         unsafe {
                             xlib::XFreeCursor(self.display, self.invisible_cursor);
@@ -309,7 +311,7 @@ impl X11 {
 
     fn emit(&self, out: &mpsc::UnboundedSender<Output>, event: Event) {
         if let Some((pos, _, _)) = self.grabbed {
-            let _ = out.send((pos, CaptureEvent::Input(event)));
+            let _ = out.send((pos, CaptureEvent::Input(event), None));
         }
     }
 
@@ -326,6 +328,7 @@ impl X11 {
                         dx: dx as f64,
                         dy: dy as f64,
                     })),
+                    None,
                 ));
                 self.warp(cx, cy);
             }
@@ -357,7 +360,7 @@ impl X11 {
             self.grabbed = Some((pos, x, y));
             let (cx, cy) = self.center();
             self.warp(cx, cy);
-            let _ = out.send((pos, CaptureEvent::Begin));
+            let _ = out.send((pos, CaptureEvent::Begin, Some((x, y))));
         }
     }
 
@@ -399,7 +402,7 @@ impl X11 {
         }
     }
 
-    fn release(&mut self) {
+    fn release(&mut self, point: Option<(i32, i32)>) {
         let Some((pos, x, y)) = self.grabbed.take() else {
             return;
         };
@@ -408,13 +411,14 @@ impl X11 {
             xlib::XUngrabKeyboard(self.display, xlib::CurrentTime);
             xlib::XUngrabPointer(self.display, xlib::CurrentTime);
         }
-        // Le curseur revient là où il est sorti, légèrement à l'intérieur de l'écran.
-        let (x, y) = match pos {
+        // Le curseur revient au point demandé, sinon là où il est sorti,
+        // légèrement à l'intérieur de l'écran.
+        let (x, y) = point.unwrap_or(match pos {
             Position::Left => (x.max(0) + 2, y),
             Position::Right => (x.min(self.width - 1) - 2, y),
             Position::Top => (x, y.max(0) + 2),
             Position::Bottom => (x, y.min(self.height - 1) - 2),
-        };
+        });
         self.warp(x, y);
         self.last = (x, y);
         // SAFETY : connexion valide.

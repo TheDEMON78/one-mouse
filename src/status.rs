@@ -228,6 +228,32 @@ pub fn emit_file(status: &FileStatus) {
     emit_line(FILE_PREFIX, &status.encode());
 }
 
+/// Écrans des deux PC, sur des lignes `@screens <json>`.
+pub const SCREENS_PREFIX: &str = "@screens ";
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ScreensStatus {
+    pub local: Vec<crate::screens::Monitor>,
+    pub peer: Vec<crate::screens::Monitor>,
+    pub peer_name: String,
+    /// Côté de l'autre PC (0 gauche, 1 droite, 2 haut, 3 bas).
+    pub side: u8,
+    /// Décalage du bureau de l'autre PC (après harmonisation).
+    pub offset: i32,
+}
+
+impl ScreensStatus {
+    pub fn parse(line: &str) -> Option<Self> {
+        serde_json::from_str(line.strip_prefix(SCREENS_PREFIX)?).ok()
+    }
+}
+
+pub fn emit_screens(status: &ScreensStatus) {
+    if let Ok(json) = serde_json::to_string(status) {
+        emit_line(SCREENS_PREFIX, &json);
+    }
+}
+
 fn emit_line(prefix: &str, text: &str) {
     if ENABLED.load(Ordering::Relaxed) {
         let mut out = std::io::stdout().lock();

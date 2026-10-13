@@ -55,10 +55,30 @@ impl Capture {
     }
 
     pub async fn release(&mut self) -> Result<()> {
+        self.release_at(None).await
+    }
+
+    /// Rend la main ; le curseur réapparaît en `point` s'il est donné.
+    pub async fn release_at(&mut self, point: Option<(i32, i32)>) -> Result<()> {
         match self {
-            Capture::Lib(c) => Ok(c.release().await?),
+            Capture::Lib(c) => {
+                c.release().await?;
+                if let Some(point) = point {
+                    crate::screens::warp_cursor(point);
+                }
+                Ok(())
+            }
             #[cfg(target_os = "linux")]
-            Capture::X11(c) => c.release(),
+            Capture::X11(c) => c.release(point),
+        }
+    }
+
+    /// Point où le curseur a quitté l'écran au dernier `Begin`.
+    pub fn exit_point(&self) -> Option<(i32, i32)> {
+        match self {
+            Capture::Lib(_) => crate::screens::cursor_position(),
+            #[cfg(target_os = "linux")]
+            Capture::X11(c) => c.exit_point,
         }
     }
 
@@ -102,6 +122,7 @@ pub struct X11Capture {
     events: tokio::sync::mpsc::UnboundedReceiver<x11::Output>,
     handles: std::collections::HashMap<Handle, Position>,
     pressed_keys: HashSet<scancode::Linux>,
+    exit_point: Option<(i32, i32)>,
 }
 
 #[cfg(target_os = "linux")]
@@ -113,6 +134,7 @@ impl X11Capture {
             events,
             handles: std::collections::HashMap::new(),
             pressed_keys: HashSet::new(),
+            exit_point: None,
         })
     }
 
@@ -136,9 +158,9 @@ impl X11Capture {
         }
     }
 
-    fn release(&mut self) -> Result<()> {
+    fn release(&mut self, point: Option<(i32, i32)>) -> Result<()> {
         self.pressed_keys.clear();
-        self.send(x11::Command::Release)
+        self.send(x11::Command::Release(point))
     }
 
     fn terminate(&mut self) -> Result<()> {
@@ -147,7 +169,10 @@ impl X11Capture {
 
     async fn next(&mut self) -> Option<(Handle, CaptureEvent)> {
         loop {
-            let (pos, event) = self.events.recv().await?;
+            let (pos, event, point) = self.events.recv().await?;
+            if point.is_some() {
+                self.exit_point = point;
+            }
             use input_event::{Event, KeyboardEvent};
             if let CaptureEvent::Input(Event::Keyboard(KeyboardEvent::Key { key, state, .. })) =
                 event

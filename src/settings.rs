@@ -31,6 +31,11 @@ impl Side {
         }
     }
 
+    /// Côté d'après son code dans le protocole (0 gauche, 1 droite, 2 haut, 3 bas).
+    pub fn from_code(code: u8) -> Option<Self> {
+        Self::ALL.get(code as usize).copied()
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Side::Left => "à gauche",
@@ -67,6 +72,14 @@ pub struct Settings {
     pub main: bool,
     /// Vitesse de la souris sur l'autre PC.
     pub pointer_speed: f64,
+    /// Décalage du bureau de l'autre PC le long du bord partagé (pixels).
+    pub peer_offset: i32,
+    /// Écrans de l'autre PC, appris à la dernière connexion.
+    pub peer_monitors: Vec<crate::screens::Monitor>,
+    /// Nom de l'autre PC à la dernière connexion.
+    pub peer_name: String,
+    /// Écrans de ce PC vus par le moteur (si la fenêtre ne peut pas les lire).
+    pub local_monitors: Vec<crate::screens::Monitor>,
     pub sound: audio::Mode,
     pub mic: audio::Mode,
     pub sound_output: String,
@@ -110,6 +123,10 @@ impl Default for Settings {
             clipboard: true,
             main: false,
             pointer_speed: 1.0,
+            peer_offset: 0,
+            peer_monitors: Vec::new(),
+            peer_name: String::new(),
+            local_monitors: Vec::new(),
             sound: audio::Mode::Always,
             mic: audio::Mode::Always,
             sound_output: String::new(),
@@ -221,6 +238,10 @@ impl Settings {
         if self.sound_quality != crate::codec::Quality::Lossless {
             args.push("--sound-quality".to_owned());
             args.push(self.sound_quality.arg().to_owned());
+        }
+        if self.peer_offset != 0 {
+            args.push("--peer-offset".to_owned());
+            args.push(self.peer_offset.to_string());
         }
         if self.pointer_speed != 1.0 {
             args.push("--pointer-speed".to_owned());

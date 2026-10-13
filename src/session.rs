@@ -53,6 +53,9 @@ pub struct Local {
     pub name: String,
     /// Position de l'autre PC par rapport à celui-ci.
     pub peer_side: Position,
+    /// Décalage du bureau de l'autre PC par rapport à celui-ci, le long du bord
+    /// partagé (en pixels ; positif : vers le bas ou la droite).
+    pub peer_offset: i32,
     pub audio: AudioConfig,
     /// Multiplicateur des mouvements de souris envoyés à l'autre PC.
     pub pointer_speed: f64,
@@ -72,6 +75,8 @@ pub struct Local {
 struct State {
     /// Nom de l'autre PC.
     peer_name: String,
+    /// Écrans de l'autre PC.
+    peer_monitors: Vec<crate::screens::Monitor>,
     /// L'autre PC est le PC principal (souris, clavier, casque).
     peer_main: bool,
     /// Nos entrées sont capturées et envoyées à l'autre PC.
@@ -289,7 +294,15 @@ where
     });
     // Côtés : chaque PC dit où il voit l'autre. S'ils ne sont pas opposés, le PC
     // principal fait foi (ou, sans PC principal, celui qui s'est connecté).
-    send(&out_tx, Message::Side(side_code(local.peer_side))).await?;
+    send(
+        &out_tx,
+        Message::Layout {
+            side: side_code(local.peer_side),
+            offset: local.peer_offset,
+        },
+    )
+    .await?;
+    send(&out_tx, Message::Screens(crate::screens::local_monitors())).await?;
     let side_authority = if local.audio.main != peer.main {
         local.audio.main
     } else {
@@ -375,8 +388,9 @@ async fn event_loop(
             event = next_capture(&mut local.capture) => {
                 let Some(event) = event else { bail!("la capture des entrées s'est arrêtée") };
                 let (_, event) = event?;
+                let side = local.peer_side;
                 let capture = local.capture.as_mut().expect("événement sans capture");
-                on_capture(capture, &mut state, out, event).await?;
+                on_capture(capture, &mut state, out, side, event).await?;
             }
             msg = incoming.recv() => {
                 // `None` : la tâche de lecture s'est arrêtée (déconnexion).
@@ -947,6 +961,7 @@ async fn on_capture(
     capture: &mut Capture,
     state: &mut State,
     out: &mpsc::Sender<Message>,
+    side: Position,
     event: CaptureEvent,
 ) -> Result<()> {
     match event {
@@ -957,8 +972,9 @@ async fn on_capture(
         CaptureEvent::Begin if state.receiving => {
             // Le curseur rejoué a atteint le bord de retour : l'autre PC reprend la main.
             log::info!("retour du curseur vers l'autre PC");
+            let along = exit_along(capture, side);
             capture.release().await?;
-            send(out, Message::Leave).await?;
+            send(out, Message::Leave { along }).await?;
         }
         CaptureEvent::Begin if recent(state.returned_at) => {
             // Bord franchi juste après le retour du curseur : rebond, ignoré.
@@ -969,13 +985,14 @@ async fn on_capture(
             state.sending = true;
             note_controller(state, true);
             status::emit(Status::Sending);
-            send(out, Message::Enter).await?;
+            let along = exit_along(capture, side);
+            send(out, Message::Enter { along }).await?;
         }
         CaptureEvent::Input(_) if !state.sending => {}
         CaptureEvent::Input(event) => {
             if capture.keys_pressed(&RELEASE_KEYS) {
                 log::info!("raccourci de secours : reprise du curseur");
-                stop_sending(capture, state, out).await?;
+                stop_sending(capture, state, out, None).await?;
                 return Ok(());
             }
             let Some(event) = scale_motion(state, event) else {
@@ -995,6 +1012,36 @@ async fn on_capture(
         }
     }
     Ok(())
+}
+
+/// Où le curseur vient de quitter l'écran, le long du bord partagé.
+fn exit_along(capture: &Capture, side: Position) -> Option<i32> {
+    crate::screens::along(
+        &crate::screens::local_monitors(),
+        side,
+        capture.exit_point()?,
+    )
+}
+
+/// Point d'arrivée du curseur venant de l'autre PC, à la même hauteur.
+fn arrival(local: &Local, along: Option<i32>) -> Option<(i32, i32)> {
+    crate::screens::entry_point(
+        &crate::screens::local_monitors(),
+        local.peer_side,
+        along?,
+        local.peer_offset,
+    )
+}
+
+/// Informe la fenêtre des écrans des deux PC et de leur alignement.
+fn emit_screens(local: &Local, state: &State) {
+    status::emit_screens(&status::ScreensStatus {
+        local: crate::screens::local_monitors(),
+        peer: state.peer_monitors.clone(),
+        peer_name: state.peer_name.clone(),
+        side: side_code(local.peer_side),
+        offset: local.peer_offset,
+    });
 }
 
 /// Le curseur de ce PC doit-il être caché ? Oui quand ce PC contrôle l'autre
@@ -1046,8 +1093,12 @@ async fn on_message(
     msg: Message,
 ) -> Result<()> {
     match msg {
-        Message::Enter => {
+        Message::Enter { along } => {
             log::info!("l'autre PC prend le contrôle de celui-ci");
+            // Le curseur apparaît à la hauteur où il a quitté l'autre écran.
+            if let Some(point) = arrival(local, along) {
+                crate::screens::warp_cursor(point);
+            }
             state.receiving = true;
             state.entered_at = Some(Instant::now());
             note_controller(state, false);
@@ -1067,12 +1118,13 @@ async fn on_message(
                 log::warn!("relâchement des touches impossible : {e}");
             }
         }
-        Message::Leave => {
+        Message::Leave { along } => {
+            let point = arrival(local, along);
             if let Some(capture) = &mut local.capture
                 && state.sending
             {
                 log::info!("le curseur revient sur ce PC");
-                stop_sending(capture, state, out).await?;
+                stop_sending(capture, state, out, point).await?;
             }
         }
         Message::Clipboard(text) => {
@@ -1165,29 +1217,41 @@ async fn on_message(
                 clipboard.set(clip);
             }
         }
-        Message::Side(code) => {
-            let Some(expected) = mirrored_side(code) else {
+        Message::Layout { side, offset } => {
+            let Some(expected) = mirrored_side(side) else {
                 return Ok(());
             };
-            if local.peer_side != expected {
+            // Vu de ce PC, le décalage de l'autre bureau est l'opposé.
+            let offset = -offset;
+            if local.peer_side != expected || local.peer_offset != offset {
                 if state.side_authority {
-                    log::warn!(
-                        "côtés incohérents : l'autre PC s'aligne sur ce PC (autre PC : {})",
-                        side_name(local.peer_side)
-                    );
-                } else {
-                    log::warn!(
-                        "côtés incohérents : ce PC s'aligne sur l'autre (autre PC : {}) — corrigez \
-                         « Où se trouve l'autre PC ? » dans l'onglet Écrans",
-                        side_name(expected)
-                    );
-                    local.peer_side = expected;
-                    if let Some(capture) = &mut local.capture {
-                        let _ = capture.destroy(PEER).await;
-                        capture.create(PEER, expected).await?;
+                    if local.peer_side != expected {
+                        log::warn!(
+                            "côtés incohérents : l'autre PC s'aligne sur ce PC (autre PC : {})",
+                            side_name(local.peer_side)
+                        );
                     }
+                } else {
+                    if local.peer_side != expected {
+                        log::warn!(
+                            "côtés incohérents : ce PC s'aligne sur l'autre (autre PC : {}) — \
+                             corrigez « Où se trouve l'autre PC ? » dans l'onglet Écrans",
+                            side_name(expected)
+                        );
+                        local.peer_side = expected;
+                        if let Some(capture) = &mut local.capture {
+                            let _ = capture.destroy(PEER).await;
+                            capture.create(PEER, expected).await?;
+                        }
+                    }
+                    local.peer_offset = offset;
                 }
             }
+            emit_screens(local, state);
+        }
+        Message::Screens(monitors) => {
+            state.peer_monitors = monitors;
+            emit_screens(local, state);
         }
         Message::WakeAddresses { macs, wired } => {
             crate::wake::remember_peer(macs, wired, &state.peer_name);
@@ -1206,6 +1270,7 @@ async fn stop_sending(
     capture: &mut Capture,
     state: &mut State,
     out: &mpsc::Sender<Message>,
+    point: Option<(i32, i32)>,
 ) -> Result<()> {
     state.sending = false;
     state.returned_at = Some(Instant::now());
@@ -1213,7 +1278,7 @@ async fn stop_sending(
     state.pending_motion = (0.0, 0.0);
     status::emit(Status::Connected(state.peer_name.clone()));
     let pressed = capture.take_pressed_keys();
-    capture.release().await?;
+    capture.release_at(point).await?;
     for key in pressed {
         let event = Event::Keyboard(KeyboardEvent::Key {
             time: 0,
