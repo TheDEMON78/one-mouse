@@ -73,6 +73,8 @@ pub struct Settings {
     pub mic_output: String,
     /// Micro à envoyer (vide = micro par défaut du système).
     pub mic_device: String,
+    /// Qualité du son envoyé.
+    pub sound_quality: crate::codec::Quality,
     /// Démarre le partage dès l'ouverture de la fenêtre.
     pub start_sharing: bool,
     /// Version du format, pour adapter les anciens réglages (absent = ancien format 0).
@@ -99,6 +101,7 @@ impl Default for Settings {
             sound_output: String::new(),
             mic_output: String::new(),
             mic_device: String::new(),
+            sound_quality: crate::codec::Quality::Lossless,
             start_sharing: false,
             format: FORMAT,
         }
@@ -178,6 +181,10 @@ impl Settings {
         }
         if self.main {
             args.push("--main".to_owned());
+        }
+        if self.sound_quality != crate::codec::Quality::Lossless {
+            args.push("--sound-quality".to_owned());
+            args.push(self.sound_quality.arg().to_owned());
         }
         if self.pointer_speed != 1.0 {
             args.push("--pointer-speed".to_owned());

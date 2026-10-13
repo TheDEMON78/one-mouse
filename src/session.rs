@@ -14,15 +14,16 @@ use anyhow::{Context, Result, bail};
 use input_capture::{CaptureEvent, Position};
 use input_emulation::InputEmulation;
 use input_event::{Event, KeyboardEvent, PointerEvent, scancode};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 
 use crate::audio::{self, AudioCapture, AudioConfig, AudioFrame, AudioPlayer, Source};
 use crate::capture::Capture;
 use crate::clipboard::ClipboardSync;
-use crate::crypto::{self, Psk, Role};
+use crate::codec::{AudioDecoder, AudioEncoder, Quality};
+use crate::crypto::{self, Psk, Role, UdpCrypto};
 use crate::default_mic;
-use crate::protocol::{self, AudioKind, MAX_CLIPBOARD_LEN, Message, PeerInfo};
+use crate::protocol::{AudioFormat, AudioKind, MAX_CLIPBOARD_LEN, Message, PeerInfo};
 use crate::status::{self, Status};
 
 /// Identifiant de l'unique autre PC (la V1 gère une seule connexion).
@@ -31,6 +32,8 @@ const PING_INTERVAL: Duration = Duration::from_secs(5);
 /// Sans message de l'autre PC pendant cette durée, la connexion est considérée perdue.
 const PEER_TIMEOUT: Duration = Duration::from_secs(15);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Intervalle des datagrammes de test tant que l'UDP n'est pas confirmé.
+const PROBE_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Raccourci de secours pour reprendre la main : Ctrl + Maj + Alt + Méta (Windows/Cmd).
 const RELEASE_KEYS: [scancode::Linux; 4] = [
@@ -73,8 +76,9 @@ struct State {
 
 pub async fn run(stream: TcpStream, role: Role, local: &mut Local) -> Result<()> {
     stream.set_nodelay(true)?;
+    let peer_ip = stream.peer_addr()?.ip();
     let (reader, writer) = stream.into_split();
-    let (mut reader, mut writer, peer) = tokio::time::timeout(
+    let (mut reader, mut writer, peer, udp_crypto) = tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
         crypto::handshake(
             reader,
@@ -123,8 +127,25 @@ pub async fn run(stream: TcpStream, role: Role, local: &mut Local) -> Result<()>
     }
     local.emulation.create(PEER).await;
 
+    // Le son passe par UDP (un paquet perdu ne bloque rien), en repli par TCP.
+    let local_ip = if peer_ip.is_ipv6() {
+        std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+    } else {
+        std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+    };
+    let socket = UdpSocket::bind((local_ip, 0)).await?;
+    send(&out_tx, Message::UdpPort(socket.local_addr()?.port())).await?;
+    let udp = Udp {
+        socket,
+        crypto: udp_crypto,
+        peer_ip,
+        peer_addr: None,
+        send_ok: false,
+        recv_ok: false,
+    };
+
     status::emit(Status::Connected(peer.name.clone()));
-    let result = event_loop(local, peer, &out_tx, &mut in_rx).await;
+    let result = event_loop(local, peer, udp, &out_tx, &mut in_rx).await;
 
     // Toujours rendre le curseur et relâcher les touches, même en cas d'erreur.
     if let Some(capture) = &mut local.capture {
@@ -149,6 +170,7 @@ pub async fn run(stream: TcpStream, role: Role, local: &mut Local) -> Result<()>
 async fn event_loop(
     local: &mut Local,
     peer: PeerInfo,
+    mut udp: Udp,
     out: &mpsc::Sender<Message>,
     incoming: &mut mpsc::Receiver<Message>,
 ) -> Result<()> {
@@ -166,6 +188,8 @@ async fn event_loop(
     }
     let mut audio = AudioState::default();
     let mut ping = tokio::time::interval(PING_INTERVAL);
+    let mut probe = tokio::time::interval(PROBE_INTERVAL);
+    let mut datagram = vec![0u8; 65_536];
 
     loop {
         audio.sync(&local.audio, &state);
@@ -179,14 +203,41 @@ async fn event_loop(
             msg = incoming.recv() => {
                 // `None` : la tâche de lecture s'est arrêtée (déconnexion).
                 let Some(msg) = msg else { return Ok(()) };
-                on_message(local, &mut state, &mut audio, out, msg).await?;
+                match msg {
+                    Message::UdpPort(port) => {
+                        udp.peer_addr = Some(std::net::SocketAddr::new(udp.peer_ip, port));
+                    }
+                    Message::UdpOk => {
+                        if !udp.send_ok {
+                            log::info!("son envoyé en UDP (paquets indépendants, pas d'attente en cas de perte)");
+                        }
+                        udp.send_ok = true;
+                    }
+                    msg => on_message(local, &mut state, &mut audio, out, msg).await?,
+                }
             }
+            received = udp.socket.recv_from(&mut datagram) => {
+                if let Ok((len, from)) = received
+                    && from.ip() == udp.peer_ip
+                    && let Some(plain) = udp.crypto.open(&datagram[..len])
+                    && let Ok(msg) = postcard::from_bytes::<Message>(&plain)
+                {
+                    if !udp.recv_ok {
+                        udp.recv_ok = true;
+                        send(out, Message::UdpOk).await?;
+                    }
+                    if let msg @ Message::Audio { .. } = msg {
+                        on_message(local, &mut state, &mut audio, out, msg).await?;
+                    }
+                }
+            }
+            _ = probe.tick() => udp.probe(),
             frame = recv_frame(&mut audio.sound) => match frame {
-                Some(frame) => send_audio(out, AudioKind::Sound, &frame),
+                Some(frame) => send_audio(&mut audio.sound, AudioKind::Sound, local.audio.quality, &frame, &mut udp, out),
                 None => audio.sound.capture_stopped(),
             },
             frame = recv_frame(&mut audio.mic) => match frame {
-                Some(frame) => send_audio(out, AudioKind::Mic, &frame),
+                Some(frame) => send_audio(&mut audio.mic, AudioKind::Mic, local.audio.quality, &frame, &mut udp, out),
                 None => audio.mic.capture_stopped(),
             },
             Some(text) = recv_clipboard(&mut local.clipboard) => {
@@ -212,9 +263,89 @@ async fn recv_frame(link: &mut AudioLink) -> Option<AudioFrame> {
     }
 }
 
-/// Le son passe après les entrées : si la connexion sature, le paquet est perdu.
-fn send_audio(out: &mpsc::Sender<Message>, kind: AudioKind, frame: &AudioFrame) {
-    let _ = out.try_send(Message::audio(kind, frame));
+/// Transport du son : UDP chiffré dès que les deux sens sont vérifiés, sinon TCP.
+struct Udp {
+    socket: UdpSocket,
+    crypto: UdpCrypto,
+    peer_ip: std::net::IpAddr,
+    /// Adresse UDP de l'autre PC (son port arrive par la connexion TCP).
+    peer_addr: Option<std::net::SocketAddr>,
+    /// L'autre PC reçoit nos datagrammes (il l'a confirmé).
+    send_ok: bool,
+    /// Nous recevons ses datagrammes (et le lui avons confirmé).
+    recv_ok: bool,
+}
+
+impl Udp {
+    fn send_datagram(&mut self, msg: &Message) {
+        let Some(addr) = self.peer_addr else { return };
+        let Ok(plain) = postcard::to_stdvec(msg) else {
+            return;
+        };
+        let packet = self.crypto.seal(&plain);
+        // Socket pleine : le paquet est perdu plutôt que de retarder la suite.
+        let _ = self.socket.try_send_to(&packet, addr);
+    }
+
+    /// Vérifie que l'UDP passe, jusqu'à confirmation de l'autre PC.
+    fn probe(&mut self) {
+        if !self.send_ok {
+            self.send_datagram(&Message::Probe);
+        }
+    }
+
+    fn send_audio(&mut self, out: &mpsc::Sender<Message>, msg: Message) {
+        if self.send_ok {
+            self.send_datagram(&msg);
+        } else {
+            // Repli TCP (UDP bloqué par un pare-feu) ; si la connexion sature, le
+            // paquet est perdu : le son passe après la souris et le clavier.
+            let _ = out.try_send(msg);
+        }
+    }
+}
+
+/// Met en paquets le son capturé (sans perte ou Opus) et l'envoie.
+fn send_audio(
+    link: &mut AudioLink,
+    kind: AudioKind,
+    quality: Quality,
+    frame: &AudioFrame,
+    udp: &mut Udp,
+    out: &mpsc::Sender<Message>,
+) {
+    if link.encoder.is_none() {
+        match AudioEncoder::new(kind, quality) {
+            Ok(encoder) => link.encoder = Some(encoder),
+            Err(e) => {
+                log::warn!("compression du son impossible : {e:#}");
+                link.capture = None;
+                link.capture_failed = true;
+                return;
+            }
+        }
+    }
+    let Some(encoder) = &mut link.encoder else {
+        return;
+    };
+    match encoder.push(frame) {
+        Ok(packets) => {
+            for packet in packets {
+                udp.send_audio(
+                    out,
+                    Message::Audio {
+                        kind,
+                        seq: packet.seq,
+                        format: packet.format,
+                        rate: packet.rate,
+                        channels: packet.channels,
+                        data: packet.data,
+                    },
+                );
+            }
+        }
+        Err(e) => log::debug!("compression du son : {e:#}"),
+    }
 }
 
 /// Un sens de partage audio (son du système ou micro) : capture locale et lecture
@@ -223,8 +354,37 @@ fn send_audio(out: &mpsc::Sender<Message>, kind: AudioKind, frame: &AudioFrame) 
 struct AudioLink {
     capture: Option<AudioCapture>,
     capture_failed: bool,
+    encoder: Option<AudioEncoder>,
+    decoder: Option<AudioDecoder>,
     player: Option<AudioPlayer>,
     player_failed: bool,
+}
+
+impl AudioLink {
+    /// Décode un paquet reçu (pertes comblées).
+    fn decode(
+        &mut self,
+        seq: u32,
+        format: AudioFormat,
+        rate: u32,
+        channels: u8,
+        data: &[u8],
+    ) -> Option<AudioFrame> {
+        if self
+            .decoder
+            .as_ref()
+            .is_none_or(|d| !d.matches(format, channels))
+        {
+            self.decoder = AudioDecoder::new(format, channels).ok();
+        }
+        match self.decoder.as_mut()?.decode(seq, rate, data) {
+            Ok(frame) => frame,
+            Err(e) => {
+                log::debug!("paquet audio illisible : {e:#}");
+                None
+            }
+        }
+    }
 }
 
 impl AudioLink {
@@ -418,11 +578,17 @@ async fn on_message(
         }
         Message::Audio {
             kind,
+            seq,
+            format,
             rate,
             channels,
-            pcm,
+            data,
         } => {
-            let Some(frame) = protocol::audio_frame(rate, channels, &pcm) else {
+            let link = match kind {
+                AudioKind::Sound => &mut audio.sound,
+                AudioKind::Mic => &mut audio.mic,
+            };
+            let Some(frame) = link.decode(seq, format, rate, channels, &data) else {
                 return Ok(());
             };
             match kind {
@@ -459,7 +625,7 @@ async fn on_message(
                 }
             }
         }
-        Message::Ping => {}
+        Message::Ping | Message::Probe | Message::UdpPort(_) | Message::UdpOk => {}
         Message::Hello { .. } => bail!("message Hello inattendu"),
     }
     Ok(())
@@ -509,6 +675,7 @@ mod tests {
             mic_device: None,
             sound_output: None,
             mic_output: None,
+            quality: Quality::Lossless,
         }
     }
 

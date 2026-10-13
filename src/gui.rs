@@ -15,6 +15,7 @@ use anyhow::{Context, Result};
 use eframe::egui;
 
 use crate::audio::{self, Mode};
+use crate::codec::Quality;
 use crate::settings::{Settings, Side};
 use crate::status::Status;
 use crate::{autostart, crypto, firewall};
@@ -570,6 +571,32 @@ impl App {
                         .color(MUTED),
                     );
                 }
+            });
+        });
+        ui.add_enabled_ui(!running, |ui| {
+            card(ui, |ui| {
+                section_title(ui, "Qualité du son envoyé");
+                let label = |q: Quality| match q {
+                    Quality::Lossless => "Sans perte (réseau local rapide)",
+                    Quality::Compressed => "Compressé, Opus (Wi-Fi faible)",
+                };
+                let quality = &mut self.settings.sound_quality;
+                egui::ComboBox::from_id_salt("quality")
+                    .selected_text(label(*quality))
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        for q in Quality::ALL {
+                            ui.selectable_value(quality, q, label(q));
+                        }
+                    });
+                ui.label(
+                    egui::RichText::new(
+                        "Sans perte : le son arrive exactement tel qu'il sort du PC (~3 Mbit/s). \
+                         Compressé : six fois moins de données, pour un Wi-Fi saturé.",
+                    )
+                    .small()
+                    .color(MUTED),
+                );
             });
         });
         if ui

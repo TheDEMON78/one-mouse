@@ -45,6 +45,7 @@ futures = "0.3"
 hkdf = "0.12"
 image = { version = "0.25", default-features = false, features = ["png"] }
 log = "0.4"
+opus = "0.4.0"
 postcard = { version = "1", features = ["use-std"] }
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }

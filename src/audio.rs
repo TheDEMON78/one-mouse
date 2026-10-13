@@ -31,6 +31,9 @@ const MIN_TARGET_MS: u32 = 60;
 const MAX_TARGET_MS: u32 = 300;
 const TARGET_STEP_UP_MS: u32 = 40;
 const TARGET_STEP_DOWN_MS: u32 = 20;
+/// Pause entre deux paquets au-delà de laquelle l'autre PC est considéré
+/// silencieux (Windows n'envoie rien quand aucun son ne joue).
+const SILENCE_GAP: std::time::Duration = std::time::Duration::from_millis(150);
 /// Durée sans coupure avant de réduire le tampon.
 const STABLE_BEFORE_SHRINK: std::time::Duration = std::time::Duration::from_secs(30);
 /// Marge au-delà de la cible avant de jeter le son en trop (rester synchrone).
@@ -97,6 +100,8 @@ pub struct AudioConfig {
     pub sound_output: Option<String>,
     /// Sortie où jouer le micro reçu de l'autre PC (ex. un câble audio virtuel).
     pub mic_output: Option<String>,
+    /// Qualité de transport du son envoyé.
+    pub quality: crate::codec::Quality,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,22 +112,12 @@ pub enum Source {
     Microphone,
 }
 
-/// Paquet de son entrelacé en virgule flottante 32 bits : aucune perte entre
-/// la carte son qui capture et celle qui joue.
+/// Paquet de son entrelacé en virgule flottante 32 bits (capture et lecture).
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioFrame {
     pub rate: u32,
     pub channels: u16,
     pub samples: Vec<f32>,
-}
-
-impl AudioFrame {
-    pub fn is_valid(&self) -> bool {
-        (8_000..=192_000).contains(&self.rate)
-            && (1..=8).contains(&self.channels)
-            && self.samples.len().is_multiple_of(self.channels as usize)
-            && self.samples.iter().all(|s| s.is_finite())
-    }
 }
 
 fn host() -> Host {
@@ -535,6 +530,8 @@ pub struct AudioPlayer {
     seen_underruns: u64,
     /// Dernier changement de taille du tampon.
     last_change: std::time::Instant,
+    /// Arrivée du paquet précédent.
+    last_push: std::time::Instant,
     _stop: std_mpsc::Sender<()>,
 }
 
@@ -597,6 +594,7 @@ impl AudioPlayer {
             target_ms: TARGET_MS,
             seen_underruns: 0,
             last_change: std::time::Instant::now(),
+            last_push: std::time::Instant::now(),
             _stop: stop_tx,
         })
     }
@@ -606,7 +604,9 @@ impl AudioPlayer {
         let Ok(mut buffer) = shared.lock() else {
             return;
         };
-        self.adapt_target(&mut buffer);
+        let gap = self.last_push.elapsed();
+        self.last_push = std::time::Instant::now();
+        self.adapt_target(&mut buffer, gap);
         // Compensation de dérive : tampon trop rempli → lecture un peu plus rapide,
         // trop vide → un peu plus lente. Lissé pour ne pas moduler la hauteur du son.
         if buffer.primed {
@@ -631,7 +631,13 @@ impl AudioPlayer {
 
 impl AudioPlayer {
     /// Tampon adaptatif : plus grand après une coupure, plus petit après 30 s sans.
-    fn adapt_target(&mut self, buffer: &mut PlayBuffer) {
+    fn adapt_target(&mut self, buffer: &mut PlayBuffer, gap: std::time::Duration) {
+        if buffer.underruns > self.seen_underruns && gap > SILENCE_GAP {
+            // Le son s'est arrêté chez l'autre PC (silence : rien à envoyer), ce
+            // n'est pas le réseau : inutile d'agrandir le tampon.
+            self.seen_underruns = buffer.underruns;
+            return;
+        }
         let target = if buffer.underruns > self.seen_underruns {
             let missed = buffer.underruns - self.seen_underruns;
             self.seen_underruns = buffer.underruns;
@@ -731,7 +737,7 @@ where
 /// professionnels. État conservé d'un paquet à l'autre. `speed` accélère ou
 /// ralentit très légèrement la lecture pour compenser la dérive entre l'horloge
 /// de la carte son qui capture et celle qui joue.
-struct Converter {
+pub(crate) struct Converter {
     out_rate: u32,
     out_channels: usize,
     in_rate: u32,
@@ -750,7 +756,7 @@ const SINC_HALF: usize = 16;
 const HISTORY: usize = 2 * SINC_HALF;
 
 impl Converter {
-    fn new(out_rate: u32, out_channels: u16) -> Self {
+    pub(crate) fn new(out_rate: u32, out_channels: u16) -> Self {
         Self {
             out_rate,
             out_channels: out_channels as usize,
@@ -762,7 +768,7 @@ impl Converter {
         }
     }
 
-    fn convert(&mut self, frame: &AudioFrame, speed: f64) -> Vec<f32> {
+    pub(crate) fn convert(&mut self, frame: &AudioFrame, speed: f64) -> Vec<f32> {
         let in_channels = frame.channels as usize;
         let out_ch = self.out_channels;
         if frame.rate != self.in_rate || in_channels != self.in_channels {
@@ -929,6 +935,32 @@ mod tests {
         assert!(max_err < 0.002, "erreur max {max_err}");
     }
 
+    /// Sens inverse : 48 kHz vers 44,1 kHz (son reçu d'Opus vers une sortie à 44,1 kHz).
+    #[test]
+    fn downsampling_is_accurate() {
+        let freq = 1000.0f64;
+        let mut conv = Converter::new(44_100, 1);
+        let mut out = Vec::new();
+        let mut n = 0usize;
+        for _ in 0..50 {
+            let samples = (0..480)
+                .map(|_| {
+                    let v = (2.0 * std::f64::consts::PI * freq * n as f64 / 48_000.0).sin();
+                    n += 1;
+                    (v * 16384.0) as i16
+                })
+                .collect();
+            out.extend(conv.convert(&frame(48_000, 1, samples), 1.0));
+        }
+        let mut max_err = 0.0f64;
+        for (k, &v) in out.iter().enumerate().skip(100).take(20_000) {
+            let t = k as f64 / 44_100.0;
+            let ideal = 0.5 * (2.0 * std::f64::consts::PI * freq * t).sin();
+            max_err = max_err.max((v as f64 - ideal).abs());
+        }
+        assert!(max_err < 0.002, "erreur max {max_err}");
+    }
+
     #[test]
     fn drift_correction_is_bounded() {
         assert_eq!(drift_speed(1.0), 1.0);
@@ -996,13 +1028,5 @@ mod tests {
             1,
             "reste aligné après le premier pop"
         );
-    }
-
-    #[test]
-    fn invalid_frames_are_rejected() {
-        assert!(frame(48_000, 2, vec![0; 4]).is_valid());
-        assert!(!frame(48_000, 0, vec![]).is_valid());
-        assert!(!frame(1, 2, vec![0; 4]).is_valid());
-        assert!(!frame(48_000, 2, vec![0; 3]).is_valid());
     }
 }

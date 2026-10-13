@@ -35,7 +35,8 @@ opposé pour revenir. **Raccourci de secours** pour reprendre la main : `Ctrl` +
 Les réglages sont enregistrés. Les options « Démarrer le partage à l'ouverture de one-mouse » et « Lancer one-mouse à
 l'ouverture de session » rendent le partage automatique.
 
-**Pare-feu** : le PC qui attend la connexion doit accepter le port TCP `24850`. Sous Windows, cliquez sur
+**Pare-feu** : le PC qui attend la connexion doit accepter le port TCP `24850` (et l'UDP pour le son, sinon il passe
+en TCP). Sous Windows, cliquez sur
 « Autoriser one-mouse dans le pare-feu » dans sa fenêtre (une confirmation Windows s'affiche). Sous Linux avec ufw :
 `sudo ufw allow 24850/tcp`. Si la connexion échoue avec « l'autre PC ne répond pas » (erreur 10060 sous Windows),
 c'est presque toujours le pare-feu du PC qui attend.
@@ -63,10 +64,11 @@ Le mot de passe peut aussi passer par la variable `ONE_MOUSE_PASSWORD`. `one-mou
   joué sur les haut-parleurs (il reviendrait en écho).
 - Sans PC principal, le son n'est envoyé que par le PC contrôlé, et le micro que par celui qui contrôle : un seul sens
   à la fois, donc jamais d'écho.
-- Qualité : son transmis sans perte (flottants 32 bits, non compressé), rééchantillonnage par sinc fenêtré
-  (32 points, filtre anti-repliement), tampon réseau adaptatif, fondus anti-clic et compensation de la dérive entre
-  les cartes son. Mesuré de bout en bout : 1 kHz et 7 kHz restitués exactement, rapport signal/bruit 71,6 dB,
-  aucune coupure.
+- **Qualité** : par défaut, son **sans perte** (flottants 32 bits, ~3 Mbit/s en stéréo), mesuré de bout en bout à
+  71,6 dB de rapport signal/bruit, sans coupure. Option « Compressé » (Opus 510 kbit/s, six fois moins de données)
+  pour un Wi-Fi saturé. Le son passe en **UDP chiffré** (paquets de 2,5 ms : un paquet perdu est comblé au lieu de
+  bloquer le flux), avec repli automatique en TCP si l'UDP est bloqué. Rééchantillonnage par sinc fenêtré, tampon
+  adaptatif (qui ne grossit pas pendant les silences), fondus anti-clic, compensation de la dérive des cartes son.
 - **Casque Bluetooth** : utiliser son micro le fait passer en « mode téléphone » (son mono, faible qualité). Choisissez
   le micro intégré du PC dans l'onglet Son (« Micro utilisé »), ou n'envoyez pas le micro.
 - **Vitesse de la souris** sur l'autre PC : réglage de ×0,25 à ×4 (`--pointer-speed`), si les deux PC n'ont pas la

@@ -103,6 +103,52 @@ impl<W: AsyncWrite + Unpin> SecureWriter<W> {
     }
 }
 
+/// Chiffrement des datagrammes UDP (son) : `compteur (8 octets) ‖ chiffré`.
+///
+/// Le compteur sert de nonce et doit croître : un paquet rejoué ou arrivé en
+/// retard est rejeté (pour le son, un paquet en retard est inutile de toute façon).
+pub struct UdpCrypto {
+    send: ChaCha20Poly1305,
+    recv: ChaCha20Poly1305,
+    send_counter: u64,
+    last_recv: Option<u64>,
+}
+
+impl UdpCrypto {
+    fn new(send_key: &[u8; 32], recv_key: &[u8; 32]) -> Self {
+        Self {
+            send: ChaCha20Poly1305::new(Key::from_slice(send_key)),
+            recv: ChaCha20Poly1305::new(Key::from_slice(recv_key)),
+            send_counter: 0,
+            last_recv: None,
+        }
+    }
+
+    pub fn seal(&mut self, plain: &[u8]) -> Vec<u8> {
+        let counter = self.send_counter;
+        self.send_counter += 1;
+        let cipher = self
+            .send
+            .encrypt(&nonce(counter), plain)
+            .expect("chiffrement d'un datagramme");
+        let mut packet = Vec::with_capacity(8 + cipher.len());
+        packet.extend_from_slice(&counter.to_be_bytes());
+        packet.extend_from_slice(&cipher);
+        packet
+    }
+
+    pub fn open(&mut self, packet: &[u8]) -> Option<Vec<u8>> {
+        let (head, cipher) = packet.split_first_chunk::<8>()?;
+        let counter = u64::from_be_bytes(*head);
+        if self.last_recv.is_some_and(|last| counter <= last) {
+            return None;
+        }
+        let plain = self.recv.decrypt(&nonce(counter), cipher).ok()?;
+        self.last_recv = Some(counter);
+        Some(plain)
+    }
+}
+
 /// Échange les nonces de session, dérive les clés et vérifie le mot de passe
 /// grâce au message `Hello`. Renvoie le canal chiffré et ce que l'autre PC annonce.
 pub async fn handshake<R, W>(
@@ -111,7 +157,7 @@ pub async fn handshake<R, W>(
     role: Role,
     psk: &Psk,
     local: &PeerInfo,
-) -> Result<(SecureReader<R>, SecureWriter<W>, PeerInfo)>
+) -> Result<(SecureReader<R>, SecureWriter<W>, PeerInfo, UdpCrypto)>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -147,6 +193,17 @@ where
         .expect("longueur HKDF valide");
     hk.expand(b"connector->listener", &mut c2l)
         .expect("longueur HKDF valide");
+    // Clés distinctes pour les paquets UDP (son), une par sens.
+    let mut udp_l2c = [0u8; 32];
+    let mut udp_c2l = [0u8; 32];
+    hk.expand(b"udp listener->connector", &mut udp_l2c)
+        .expect("longueur HKDF valide");
+    hk.expand(b"udp connector->listener", &mut udp_c2l)
+        .expect("longueur HKDF valide");
+    let udp = match role {
+        Role::Listener => UdpCrypto::new(&udp_l2c, &udp_c2l),
+        Role::Connector => UdpCrypto::new(&udp_c2l, &udp_l2c),
+    };
     let (send_key, recv_key) = match role {
         Role::Listener => (l2c, c2l),
         Role::Connector => (c2l, l2c),
@@ -181,7 +238,7 @@ where
                 "version de protocole différente (locale {}, distante {version})",
                 crate::protocol::PROTOCOL_VERSION
             );
-            Ok((secure_reader, secure_writer, PeerInfo { name, main }))
+            Ok((secure_reader, secure_writer, PeerInfo { name, main }, udp))
         }
         other => bail!("message inattendu pendant la connexion : {other:?}"),
     }
@@ -207,11 +264,13 @@ mod tests {
             SecureReader<impl AsyncRead + Unpin>,
             SecureWriter<impl AsyncWrite + Unpin>,
             PeerInfo,
+            UdpCrypto,
         )>,
         Result<(
             SecureReader<impl AsyncRead + Unpin>,
             SecureWriter<impl AsyncWrite + Unpin>,
             PeerInfo,
+            UdpCrypto,
         )>,
     ) {
         let (a, b) = tokio::io::duplex(64 * 1024);
@@ -229,8 +288,8 @@ mod tests {
     #[tokio::test]
     async fn same_password_connects_and_exchanges() {
         let (a, b) = pair("mot de passe", "mot de passe").await;
-        let (mut ar, mut aw, a_peer) = a.unwrap();
-        let (mut br, mut bw, b_peer) = b.unwrap();
+        let (mut ar, mut aw, a_peer, mut a_udp) = a.unwrap();
+        let (mut br, mut bw, b_peer, mut b_udp) = b.unwrap();
         assert_eq!(a_peer, peer("pc-b", false));
         assert_eq!(b_peer, peer("pc-a", true));
 
@@ -240,6 +299,20 @@ mod tests {
         let msg = Message::Clipboard("bonjour".into());
         bw.send(&msg).await.unwrap();
         assert_eq!(ar.recv().await.unwrap(), msg);
+
+        // Datagrammes UDP : déchiffrés dans l'autre sens, rejeu et altération rejetés.
+        let first = a_udp.seal(b"son 1");
+        let second = a_udp.seal(b"son 2");
+        assert_eq!(b_udp.open(&second).as_deref(), Some(&b"son 2"[..]));
+        assert_eq!(b_udp.open(&first), None, "paquet en retard");
+        assert_eq!(b_udp.open(&second), None, "paquet rejoué");
+        let mut altered = a_udp.seal(b"son 3");
+        *altered.last_mut().unwrap() ^= 1;
+        assert_eq!(b_udp.open(&altered), None, "paquet modifié");
+        assert_eq!(
+            a_udp.open(&b_udp.seal(b"retour")).as_deref(),
+            Some(&b"retour"[..])
+        );
     }
 
     #[tokio::test]

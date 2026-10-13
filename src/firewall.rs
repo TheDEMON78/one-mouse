@@ -40,21 +40,26 @@ mod imp {
             .creation_flags(CREATE_NO_WINDOW)
             .output()
             .ok()?;
-        // Une règle de blocage au même nom ne compte pas comme une autorisation.
+        // Une règle de blocage au même nom ne compte pas comme une autorisation, ni
+        // l'ancienne règle limitée à TCP (le son passe maintenant par UDP).
         let text = String::from_utf8_lossy(&output.stdout).to_lowercase();
-        Some(output.status.success() && !text.contains("block") && !text.contains("bloquer"))
+        Some(
+            output.status.success()
+                && !text.contains("block")
+                && !text.contains("bloquer")
+                && !text.contains("tcp"),
+        )
     }
 
     pub fn allow() -> Result<()> {
         let exe = std::env::current_exe().context("chemin de l'application introuvable")?;
         let exe = exe.display().to_string();
-        let port = crate::DEFAULT_PORT;
         // Toutes les commandes dans une seule élévation : une seule confirmation.
         let commands = format!(
             "netsh advfirewall firewall delete rule name=\"{RULE}\" & \
              netsh advfirewall firewall delete rule name=\"{RULE}.exe\" & \
              netsh advfirewall firewall add rule name=\"{RULE}\" dir=in action=allow \
-             program=\"{exe}\" enable=yes profile=any protocol=TCP localport={port}"
+             program=\"{exe}\" enable=yes profile=any"
         );
         // Chaîne PowerShell entre apostrophes : on double celles du chemin.
         let script = format!(

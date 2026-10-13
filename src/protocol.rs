@@ -3,10 +3,8 @@
 use input_event::{Event, KeyboardEvent, PointerEvent};
 use serde::{Deserialize, Serialize};
 
-use crate::audio::AudioFrame;
-
 /// Version du protocole, incrémentée à chaque changement incompatible.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Taille maximale d'un texte de presse-papier synchronisé (512 Kio).
 pub const MAX_CLIPBOARD_LEN: usize = 512 * 1024;
@@ -30,13 +28,22 @@ pub enum Message {
     Leave,
     /// Nouveau texte copié dans le presse-papier.
     Clipboard(String),
-    /// Paquet de son (flottants 32 bits little-endian entrelacés).
+    /// Paquet de son (sans perte ou Opus).
     Audio {
         kind: AudioKind,
+        /// Numéro du paquet, pour repérer les pertes.
+        seq: u32,
+        format: AudioFormat,
         rate: u32,
-        channels: u16,
-        pcm: Vec<u8>,
+        channels: u8,
+        data: Vec<u8>,
     },
+    /// Port UDP où envoyer le son à ce PC.
+    UdpPort(u16),
+    /// Les datagrammes UDP de l'autre PC arrivent bien : le son peut passer par UDP.
+    UdpOk,
+    /// Datagramme de test, pour vérifier que l'UDP passe.
+    Probe,
     /// Maintien de la connexion.
     Ping,
 }
@@ -48,41 +55,21 @@ pub struct PeerInfo {
     pub main: bool,
 }
 
+/// Codage d'un paquet de son.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AudioFormat {
+    /// Flottants 32 bits little-endian entrelacés, sans perte.
+    Pcm,
+    /// Trame Opus de 10 ms à 48 kHz.
+    Opus,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AudioKind {
     /// Son du système (ce qui sort des haut-parleurs).
     Sound,
     /// Micro.
     Mic,
-}
-
-impl Message {
-    pub fn audio(kind: AudioKind, frame: &AudioFrame) -> Self {
-        Message::Audio {
-            kind,
-            rate: frame.rate,
-            channels: frame.channels,
-            pcm: frame.samples.iter().flat_map(|s| s.to_le_bytes()).collect(),
-        }
-    }
-}
-
-/// Reconstitue un paquet de son reçu ; `None` s'il est invalide.
-pub fn audio_frame(rate: u32, channels: u16, pcm: &[u8]) -> Option<AudioFrame> {
-    if !pcm.len().is_multiple_of(4) {
-        return None;
-    }
-    let frame = AudioFrame {
-        rate,
-        channels,
-        samples: pcm
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|&b| f32::from_le_bytes(b))
-            .collect(),
-    };
-    frame.is_valid().then_some(frame)
 }
 
 /// Équivalent sérialisable de [`input_event::Event`].
@@ -235,24 +222,15 @@ mod tests {
 
     #[test]
     fn audio_roundtrip() {
-        let frame = AudioFrame {
+        let msg = Message::Audio {
+            kind: AudioKind::Mic,
+            seq: 42,
+            format: AudioFormat::Opus,
             rate: 48_000,
-            channels: 2,
-            samples: vec![0.0, -0.25, 1.0, -1.0],
+            channels: 1,
+            data: vec![1, 2, 3],
         };
-        let Message::Audio {
-            kind,
-            rate,
-            channels,
-            pcm,
-        } = Message::audio(AudioKind::Mic, &frame)
-        else {
-            panic!("mauvais message")
-        };
-        assert_eq!(kind, AudioKind::Mic);
-        assert_eq!(audio_frame(rate, channels, &pcm), Some(frame));
-        assert_eq!(audio_frame(48_000, 2, &[0, 0, 0]), None);
-        assert_eq!(audio_frame(48_000, 1, &f32::NAN.to_le_bytes()), None);
-        assert_eq!(audio_frame(48_000, 0, &[]), None);
+        let bytes = postcard::to_stdvec(&msg).unwrap();
+        assert_eq!(postcard::from_bytes::<Message>(&bytes).unwrap(), msg);
     }
 }

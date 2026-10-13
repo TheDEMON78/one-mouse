@@ -11,6 +11,7 @@ mod audio;
 mod autostart;
 mod capture;
 mod clipboard;
+mod codec;
 mod crypto;
 mod default_mic;
 mod firewall;
@@ -92,6 +93,11 @@ struct Cli {
     /// always : en permanence depuis le PC principal).
     #[arg(long, value_enum, global = true, default_value = "always")]
     mic: audio::Mode,
+
+    /// Qualité du son envoyé : lossless (sans perte, réseau local rapide) ou
+    /// compressed (Opus, Wi-Fi faible).
+    #[arg(long, value_enum, global = true, default_value = "lossless")]
+    sound_quality: codec::Quality,
 
     /// Source du son à envoyer (par défaut : la sortie audio principale).
     #[arg(long, global = true, value_name = "PÉRIPHÉRIQUE")]
@@ -231,6 +237,7 @@ async fn run(cli: Cli, mode: Mode) -> Result<()> {
             mic_device: cli.mic_device,
             sound_output: cli.sound_output,
             mic_output: cli.mic_output,
+            quality: cli.sound_quality,
         },
     };
 
