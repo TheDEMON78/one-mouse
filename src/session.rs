@@ -28,9 +28,11 @@ use crate::status::{self, LinkStatus, MicStatus, Status};
 
 /// Identifiant de l'unique autre PC (la V1 gère une seule connexion).
 const PEER: u64 = 0;
-const PING_INTERVAL: Duration = Duration::from_secs(5);
-/// Sans message de l'autre PC pendant cette durée, la connexion est considérée perdue.
-const PEER_TIMEOUT: Duration = Duration::from_secs(15);
+const PING_INTERVAL: Duration = Duration::from_secs(3);
+/// Sans message de l'autre PC pendant cette durée, la connexion est considérée
+/// perdue. Large : un Wi-Fi en économie d'énergie ou un PC très chargé peuvent
+/// se taire plusieurs secondes sans que la liaison soit coupée.
+const PEER_TIMEOUT: Duration = Duration::from_secs(25);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Intervalle des datagrammes de test tant que l'UDP n'est pas confirmé.
 const PROBE_INTERVAL: Duration = Duration::from_millis(500);
@@ -811,7 +813,13 @@ struct AudioState {
     mic_unavailable: bool,
     /// Micro virtuel mis par défaut pendant la connexion (rétabli à la fin).
     _default_mic: Option<default_mic::DefaultMicGuard>,
+    /// Recherche du micro virtuel et passage par défaut en cours, hors de la
+    /// boucle (PowerShell peut prendre plusieurs secondes sous Windows).
+    mic_setup: Option<tokio::task::JoinHandle<Result<MicSetup>>>,
 }
+
+/// Micro virtuel trouvé pour le micro de l'autre PC, et garde du micro par défaut.
+type MicSetup = (Option<String>, Option<default_mic::DefaultMicGuard>);
 
 impl AudioState {
     /// Le périphérique par défaut a changé (casque branché, sortie choisie dans
@@ -1215,18 +1223,30 @@ async fn on_message(
                     .sound
                     .play(&frame, local.audio.sound_output.as_deref()),
                 AudioKind::Mic => {
-                    if audio.mic_output.is_none() && !audio.mic_unavailable {
+                    if audio.mic_output.is_none()
+                        && !audio.mic_unavailable
+                        && audio.mic_setup.is_none()
+                    {
                         // Le micro de l'autre PC devient un micro de ce PC : il est joué
                         // dans un micro virtuel, jamais sur les haut-parleurs (écho).
-                        let output = local
-                            .audio
-                            .mic_output
-                            .clone()
-                            .or_else(audio::virtual_mic_output);
+                        // Recherche et réglage hors de la boucle : elle ne doit jamais
+                        // bloquer (la connexion tomberait faute de nouvelles).
+                        let configured = local.audio.mic_output.clone();
+                        audio.mic_setup = Some(tokio::task::spawn_blocking(move || {
+                            let output = configured.or_else(audio::virtual_mic_output);
+                            let guard = output.as_deref().and_then(default_mic::switch_to_virtual);
+                            Ok((output, guard))
+                        }));
+                    }
+                    if let Some(result) = take_finished(&mut audio.mic_setup) {
+                        let (output, guard) = result.unwrap_or_else(|e| {
+                            log::warn!("micro de l'autre PC : {e:#}");
+                            (None, None)
+                        });
+                        audio._default_mic = guard;
                         match output {
                             Some(output) => {
                                 log::info!("micro de l'autre PC disponible via « {output} »");
-                                audio._default_mic = default_mic::switch_to_virtual(&output);
                                 let name = default_mic::virtual_mic_name(&output);
                                 status::emit_mic(if audio._default_mic.is_some() {
                                     MicStatus::Default(name)

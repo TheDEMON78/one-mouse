@@ -249,7 +249,8 @@ where
         } => {
             ensure!(
                 version == crate::protocol::PROTOCOL_VERSION,
-                "version de protocole différente (locale {}, distante {version})",
+                "version de protocole différente (locale {}, distante {version}) : mettez \
+                 one-mouse à jour sur les deux PC",
                 crate::protocol::PROTOCOL_VERSION
             );
             Ok((secure_reader, secure_writer, PeerInfo { name, main }, udp))

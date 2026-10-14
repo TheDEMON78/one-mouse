@@ -73,6 +73,8 @@ struct Shared {
     drag_edge: Option<(DragEdge, Instant)>,
     /// Problème courant repéré dans le journal (mot de passe différent…).
     hint: Option<String>,
+    /// L'autre PC a une autre version : chercher tout de suite une mise à jour.
+    version_mismatch: bool,
     log: VecDeque<String>,
 }
 
@@ -170,6 +172,9 @@ impl Engine {
                 if let Some(hint) = hint_for(&line) {
                     shared.hint = Some(hint);
                 }
+                if is_version_mismatch(&line) {
+                    shared.version_mismatch = true;
+                }
                 shared.push_log(simplify_log(&line));
                 drop(shared);
                 ctx.request_repaint();
@@ -205,7 +210,8 @@ impl Engine {
 
     fn stop(&mut self) {
         self.stdin = None;
-        let deadline = Instant::now() + Duration::from_secs(2);
+        // Le moteur rétablit le micro par défaut avant de quitter (PowerShell).
+        let deadline = Instant::now() + Duration::from_secs(6);
         while Instant::now() < deadline {
             if !self.is_running() {
                 return;
@@ -259,6 +265,12 @@ fn friendly_error(message: &str) -> String {
         }
         text
     })
+}
+
+/// Message du moteur indiquant que les deux PC n'ont pas la même version.
+fn is_version_mismatch(message: &str) -> bool {
+    let m = message.to_lowercase();
+    m.contains("mettez one-mouse à jour") || m.contains("version incompatible")
 }
 
 /// Problème courant reconnu dans un message du moteur, expliqué simplement.
@@ -320,6 +332,8 @@ struct App {
     wizard_main: Option<bool>,
     /// Des fichiers survolent la zone de dépôt.
     drop_zone_hovered: bool,
+    /// Dernière recherche de mise à jour déclenchée par des versions différentes.
+    mismatch_checked: Option<Instant>,
     logo: egui::TextureHandle,
     tab: Tab,
     /// Icône de la zone de notification (Windows).
@@ -374,6 +388,7 @@ impl App {
             wizard,
             wizard_main: None,
             drop_zone_hovered: false,
+            mismatch_checked: None,
             logo,
             tab: Tab::Connection,
             tray: Tray::new(cc, ICON_PNG),
@@ -1324,14 +1339,30 @@ impl App {
     }
 
     fn handle_update(&mut self, ctx: &egui::Context) {
+        // Versions différentes : l'autre PC vient sans doute de se mettre à jour.
+        // On cherche aussitôt (au plus toutes les 10 min) au lieu d'attendre 6 h.
+        if std::mem::take(&mut self.shared.lock().expect("verrou").version_mismatch)
+            && self
+                .mismatch_checked
+                .is_none_or(|at| at.elapsed() > Duration::from_secs(600))
+        {
+            self.mismatch_checked = Some(Instant::now());
+            log::info!("versions différentes : recherche d'une mise à jour");
+            self.updater.check_now();
+        }
         if !matches!(self.updater.state(), crate::update::UpdateState::Ready(_)) {
             return;
         }
-        let busy = matches!(
-            self.shared.lock().expect("verrou").status,
-            Some(Status::Sending | Status::Receiving)
-        );
-        if !(self.install_requested || self.settings.auto_update && !busy) {
+        // Jamais pendant une connexion : installer redémarre one-mouse, ce qui
+        // couperait la souris et le son. La mise à jour attend que le partage
+        // soit arrêté, ou que l'autre PC ne soit pas joignable (par exemple
+        // parce qu'il vient lui-même de se mettre à jour).
+        let connected = self.running()
+            && matches!(
+                self.shared.lock().expect("verrou").status,
+                Some(Status::Connected(_) | Status::Sending | Status::Receiving)
+            );
+        if !(self.install_requested || self.settings.auto_update && !connected) {
             return;
         }
         let Some(prepared) = self.updater.take_ready() else {
@@ -1390,9 +1421,10 @@ impl App {
                     "Installer les nouvelles versions automatiquement",
                 )
                 .on_hover_text(
-                    "Dès qu'une version sort, elle est téléchargée puis installée quand la souris \
-                     ne contrôle aucun PC (le partage redémarre seul). Gardez-le sur les deux PC : \
-                     ils ont ainsi toujours la même version.",
+                    "Dès qu'une version sort, elle est téléchargée, puis installée quand les deux \
+                     PC ne sont pas connectés (partage arrêté, ou autre PC injoignable) : jamais \
+                     de coupure en pleine utilisation. Gardez-le sur les deux PC : ils ont ainsi \
+                     toujours la même version.",
                 )
                 .changed()
             {

@@ -54,6 +54,8 @@ use crate::status::{BtStatus, Status};
 
 const DEFAULT_PORT: u16 = 24850;
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
+/// Après une connexion qui vient de tomber : nouvel essai presque immédiat.
+const QUICK_RECONNECT: Duration = Duration::from_millis(500);
 
 #[derive(Parser)]
 #[command(
@@ -346,6 +348,8 @@ async fn run(cli: Cli, mode: Mode) -> Result<()> {
         let _ = capture.terminate().await;
     }
     local.emulation.terminate().await;
+    // Micro par défaut rétabli avant de quitter (il l'est dans un thread).
+    default_mic::wait_restores();
     result
 }
 
@@ -434,6 +438,7 @@ async fn serve_mode(mode: &Mode, local: &mut Local) -> Result<()> {
         Mode::Connect { host: None } if !local.audio.bluetooth => {
             log::info!("recherche de l'autre PC sur le réseau (même mot de passe)");
             let mut last_error = String::new();
+            let mut quick = false;
             loop {
                 status::emit(Status::Connecting);
                 let found = discovery::find(&local.psk, DISCOVERY_TIMEOUT).await;
@@ -449,6 +454,7 @@ async fn serve_mode(mode: &Mode, local: &mut Local) -> Result<()> {
                                         log::warn!("connexion avec « {name} » terminée : {e:#}")
                                     }
                                 }
+                                quick = true;
                                 Ok(())
                             }
                             Err(e) => Err(format!(
@@ -466,13 +472,19 @@ async fn serve_mode(mode: &Mode, local: &mut Local) -> Result<()> {
                     log::warn!("{message}");
                     last_error = message;
                 }
-                tokio::time::sleep(RECONNECT_DELAY).await;
+                tokio::time::sleep(if std::mem::take(&mut quick) {
+                    QUICK_RECONNECT
+                } else {
+                    RECONNECT_DELAY
+                })
+                .await;
             }
         }
         Mode::Connect { host: None } => {
             log::info!("recherche de l'autre PC parmi les PC associés en Bluetooth");
             status::emit_bt(BtStatus::Searching(String::new()));
             let mut last_error = String::new();
+            let mut quick = false;
             loop {
                 status::emit(Status::Connecting);
                 match bluetooth::connect_paired(bluetooth::known_peer()).await {
@@ -485,6 +497,7 @@ async fn serve_mode(mode: &Mode, local: &mut Local) -> Result<()> {
                             Ok(()) => log::info!("« {name} » s'est déconnecté"),
                             Err(e) => log::warn!("connexion Bluetooth terminée : {e:#}"),
                         }
+                        quick = true;
                     }
                     Err(e) => {
                         // Le même échec se répète à chaque essai : signalé une fois.
@@ -496,7 +509,12 @@ async fn serve_mode(mode: &Mode, local: &mut Local) -> Result<()> {
                         }
                     }
                 }
-                tokio::time::sleep(RECONNECT_DELAY).await;
+                tokio::time::sleep(if std::mem::take(&mut quick) {
+                    QUICK_RECONNECT
+                } else {
+                    RECONNECT_DELAY
+                })
+                .await;
             }
         }
         Mode::Connect { host: Some(host) } => {
@@ -505,16 +523,25 @@ async fn serve_mode(mode: &Mode, local: &mut Local) -> Result<()> {
             } else {
                 format!("{host}:{DEFAULT_PORT}")
             };
+            let mut quick = false;
             loop {
                 status::emit(Status::Connecting);
                 match TcpStream::connect(&addr).await {
-                    Ok(stream) => match session::run(stream, Role::Connector, local).await {
-                        Ok(()) => log::info!("{addr} s'est déconnecté"),
-                        Err(e) => log::warn!("connexion avec {addr} terminée : {e:#}"),
-                    },
+                    Ok(stream) => {
+                        match session::run(stream, Role::Connector, local).await {
+                            Ok(()) => log::info!("{addr} s'est déconnecté"),
+                            Err(e) => log::warn!("connexion avec {addr} terminée : {e:#}"),
+                        }
+                        quick = true;
+                    }
                     Err(e) => log::warn!("connexion à {addr} impossible : {e}{}", connect_hint(&e)),
                 }
-                tokio::time::sleep(RECONNECT_DELAY).await;
+                tokio::time::sleep(if std::mem::take(&mut quick) {
+                    QUICK_RECONNECT
+                } else {
+                    RECONNECT_DELAY
+                })
+                .await;
             }
         }
     }

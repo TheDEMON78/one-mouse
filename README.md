@@ -70,8 +70,9 @@ installez **la même version sur les deux PC** :
 one-mouse vérifie les nouvelles versions au démarrage puis toutes les 6 heures (onglet Réglages → Mises à jour).
 
 - **Windows** et **Linux (AppImage)** : la nouvelle version est téléchargée, son empreinte SHA-256 vérifiée, puis elle
-  est installée dès que la souris ne contrôle aucun PC ; one-mouse redémarre seul (et relance le partage si l'option
-  est cochée). Laissez l'option activée sur les deux PC : ils gardent toujours la même version.
+  est installée quand les deux PC ne sont pas connectés (partage arrêté, ou autre PC injoignable) : jamais de coupure
+  en pleine utilisation. one-mouse redémarre seul (et relance le partage si l'option est cochée). Si l'autre PC a déjà
+  une version plus récente, la mise à jour est cherchée aussitôt. Laissez l'option activée sur les deux PC.
 - **macOS** et **Linux (.deb)** : la fenêtre signale la nouvelle version et ouvre sa page de téléchargement.
 
 ## Démarrage rapide

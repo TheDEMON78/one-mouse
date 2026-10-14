@@ -35,7 +35,30 @@ pub fn virtual_mic_name(output: &str) -> String {
 
 impl Drop for DefaultMicGuard {
     fn drop(&mut self) {
-        imp::restore(&self.previous);
+        // Rétabli dans un thread : PowerShell peut prendre plusieurs secondes et
+        // la reconnexion ne doit pas l'attendre.
+        let previous = std::mem::take(&mut self.previous);
+        if let Ok(handle) = std::thread::Builder::new()
+            .name("micro-par-defaut".into())
+            .spawn(move || imp::restore(&previous))
+        {
+            RESTORES
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(handle);
+        }
+    }
+}
+
+/// Rétablissements du micro par défaut en cours.
+static RESTORES: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Attend la fin des rétablissements en cours (avant l'arrêt du moteur).
+pub fn wait_restores() {
+    let handles = std::mem::take(&mut *RESTORES.lock().unwrap_or_else(|e| e.into_inner()));
+    for handle in handles {
+        let _ = handle.join();
     }
 }
 
